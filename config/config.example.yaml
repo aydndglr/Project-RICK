@@ -1,0 +1,27 @@
+app:
+  name: "Rick Agent V2"
+  version: "3.5.0"
+  debug: false
+  work_dir: "." # Rick'in kod yazacağı alan
+
+brain:
+  default_provider: "ollama"
+  ollama:
+    base_url: "http://localhost:11434"
+    model_name: "qwen3:4b" # Veya senin tercih ettiğin bir model
+  temperature: 0.1
+
+capabilities:
+  allow_shell: true
+  allow_file_system: true
+  allow_patching: true
+  allow_gui: true
+
+security:
+  require_approval: true # Kritik işlemlerde sana soracak
+  sandbox_enabled: true
+
+communication:
+  whatsapp:
+    enabled: true
+    admin_phone: "5345365456745654" # Kendi numaranı buraya yaz

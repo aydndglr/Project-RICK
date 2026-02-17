@@ -1,0 +1,30 @@
+# --- Derlenmiş Dosyalar (Builds) ---
+*.exe
+*.dll
+*.so
+*.dylib
+/bin/
+/obj/
+
+# --- Loglar ve Geçici Dosyalar ---
+*.log
+rick_debug.log
+
+# --- Veritabanları (Çok Önemli!) ---
+# Bu dosyalar kişisel veriler ve hafıza içeriyor, yükleme!
+*.db
+*.sqlite
+rick_whatsapp.db
+store.db
+rick_memory.json
+
+# --- Hassas Ayarlar (Secrets) ---
+# API Key'lerin olduğu dosyayı gönderme!
+# config.yaml yerine config.example.yaml yükleyeceğiz.
+config/config.yaml
+.env
+
+# --- IDE ve Sistem Dosyaları ---
+.vscode/
+.idea/
+.DS_Store
