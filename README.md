@@ -65,12 +65,4 @@ Bu depodaki kodlar sadece portföy sunumu ve inceleme amacıyla paylaşılmışt
 
 Detaylar için LICENSE dosyasına bakınız.
 
----
 
-### 🚀 Git'e Yükleme Komutları
-Bu dosyaları oluşturup kaydettikten sonra terminalden şu komutları çalıştırarak GitHub'a gönderebilirsin:
-
-```powershell
-git add .
-git commit -m "Docs: Lisans ve Readme eklendi (All Rights Reserved)"
-git push
