@@ -28,11 +28,13 @@ var (
 
 // --- ALARM MOTORU (Arka Plan) ---
 
-// StartScheduler: Main fonksiyonunda bir kere çağrılmalı.
+// StartScheduler: Main fonksiyonunda veya bir komut tetiklendiğinde başlatılır.
 func StartScheduler() {
-	if schedulerOn { return }
+	if schedulerOn {
+		return
+	}
 	schedulerOn = true
-	
+
 	loadReminders()
 
 	go func() {
@@ -53,12 +55,9 @@ func checkReminders() {
 	for i, r := range reminders {
 		if !r.Completed && now.After(r.Time) {
 			// 🔔 ALARM ÇALDI!
-			// Konsola bas (İleride WhatsApp'tan da atabilir)
 			logger.Success("\n\n⏰ [ALARM] RICK HATIRLATIYOR: %s\n", r.Message)
 			
-			// Windows Toast Bildirimi (Opsiyonel - PowerShell ile)
-			// go exec.Command("powershell", "-Command", fmt.Sprintf(`New-BurntToastNotification -Text "Rick Alarm", "%s"`, r.Message)).Run()
-
+			// Gelecekte buraya WhatsApp veya sistem bildirimi eklenebilir.
 			reminders[i].Completed = true
 			dirty = true
 		}
@@ -83,11 +82,30 @@ func saveReminders() {
 
 // --- TOOL: SET REMINDER ---
 
-type SetReminderCommand struct {}
+type SetReminderCommand struct{}
 
 func (c *SetReminderCommand) Name() string { return "set_reminder" }
+
 func (c *SetReminderCommand) Description() string {
-	return "İleri tarihli hatırlatıcı/alarm kurar. Parametreler: 'time' (Format: YYYY-MM-DD HH:MM), 'message'."
+	return "Belirli bir tarih ve saat için hatırlatıcı veya alarm kurar."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *SetReminderCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"time": map[string]interface{}{
+				"type":        "string",
+				"description": "Hatırlatıcı zamanı (Format: YYYY-MM-DD HH:MM).",
+			},
+			"message": map[string]interface{}{
+				"type":        "string",
+				"description": "Zamanı geldiğinde hatırlatılacak mesaj.",
+			},
+		},
+		"required": []string{"time", "message"},
+	}
 }
 
 func (c *SetReminderCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -95,15 +113,14 @@ func (c *SetReminderCommand) Execute(ctx context.Context, args map[string]interf
 	msg, _ := args["message"].(string)
 
 	if timeStr == "" || msg == "" {
-		return "", fmt.Errorf("eksik parametre: time ve message zorunlu")
+		return "", fmt.Errorf("hata: 'time' ve 'message' parametreleri zorunludur")
 	}
 
 	// Zamanı Parse Et
-	// Rick bazen saniye de ekleyebilir, iki formatı da deneyelim
 	layout := "2006-01-02 15:04"
 	targetTime, err := time.Parse(layout, timeStr)
 	if err != nil {
-		// Alternatif format (saniyeli)
+		// Alternatif format (saniyeli) denemesi
 		targetTime, err = time.Parse("2006-01-02 15:04:05", timeStr)
 		if err != nil {
 			return "", fmt.Errorf("zaman formatı hatası (Beklenen: YYYY-MM-DD HH:MM): %v", err)
@@ -111,21 +128,21 @@ func (c *SetReminderCommand) Execute(ctx context.Context, args map[string]interf
 	}
 
 	if targetTime.Before(time.Now()) {
-		return "", fmt.Errorf("geçmiş zamana alarm kurulamaz. (Şu an: %s)", time.Now().Format(layout))
+		return "", fmt.Errorf("geçmiş bir zamana alarm kurulamaz. (Şu anki zaman: %s)", time.Now().Format(layout))
 	}
 
 	mu.Lock()
 	reminders = append(reminders, Reminder{
-		ID:      fmt.Sprintf("rem_%d", time.Now().Unix()),
-		Time:    targetTime,
-		Message: msg,
+		ID:        fmt.Sprintf("rem_%d", time.Now().Unix()),
+		Time:      targetTime,
+		Message:   msg,
 		Completed: false,
 	})
 	saveReminders()
 	mu.Unlock()
 
-	// Eğer Scheduler henüz başlamadıysa başlat (Garanti olsun)
+	// Scheduler'ın çalıştığından emin ol
 	StartScheduler()
 
-	return fmt.Sprintf("⏰ Alarm Kuruldu!\nZaman: %s\nMesaj: %s", targetTime.Format(layout), msg), nil
+	return fmt.Sprintf("⏰ Hatırlatıcı Kuruldu!\n📅 Zaman: %s\n💬 Mesaj: %s", targetTime.Format(layout), msg), nil
 }

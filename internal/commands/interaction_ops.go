@@ -13,11 +13,25 @@ type PresentAnswerCommand struct{}
 func (c *PresentAnswerCommand) Name() string { return "present_answer" }
 
 func (c *PresentAnswerCommand) Description() string {
-	return "Görevi tamamladığında ve kullanıcıya nihai cevabı vermek istediğinde BU ARACI KULLANMAK ZORUNDASIN. Parametre: 'answer' (Kullanıcıya gösterilecek detaylı yanıt)."
+	return "Görevi tamamladığında ve kullanıcıya nihai cevabı vermek istediğinde BU ARACI KULLANMAK ZORUNDASIN."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *PresentAnswerCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"answer": map[string]interface{}{
+				"type":        "string",
+				"description": "Kullanıcıya gösterilecek detaylı ve nihai yanıt.",
+			},
+		},
+		"required": []string{"answer"},
+	}
 }
 
 func (c *PresentAnswerCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	// GÜNCELLEME: Rick 'answer' yerine başka bir şey gönderirse de kabul et (Fallback Logic)
+	// GÜNCELLEME: Şema "answer" zorunlu kılıyor ama yine de esnek olalım (Fallback Logic).
 	
 	// 1. Öncelikli olarak 'answer' ara
 	if val, ok := args["answer"].(string); ok && val != "" {

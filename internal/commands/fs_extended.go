@@ -18,7 +18,24 @@ type CopyPathCommand struct {
 func (c *CopyPathCommand) Name() string { return "copy_path" }
 
 func (c *CopyPathCommand) Description() string {
-	return "Dosya veya klasörü kopyalar. 'source' (kaynak) ve 'destination' (hedef) parametreleri alır. Klasörleri recursive (içindekilerle birlikte) kopyalar."
+	return "Dosya veya klasörü kopyalar. Klasörleri recursive (içindekilerle birlikte) kopyalar."
+}
+
+func (c *CopyPathCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"source": map[string]interface{}{
+				"type":        "string",
+				"description": "Kopyalanacak kaynak dosya veya klasörün yolu.",
+			},
+			"destination": map[string]interface{}{
+				"type":        "string",
+				"description": "Hedef yol.",
+			},
+		},
+		"required": []string{"source", "destination"},
+	}
 }
 
 func (c *CopyPathCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -58,7 +75,24 @@ type MovePathCommand struct {
 func (c *MovePathCommand) Name() string { return "move_path" }
 
 func (c *MovePathCommand) Description() string {
-	return "Dosya veya klasörü taşır (veya ismini değiştirir). 'source' ve 'destination' parametreleri alır."
+	return "Dosya veya klasörü taşır (veya ismini değiştirir)."
+}
+
+func (c *MovePathCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"source": map[string]interface{}{
+				"type":        "string",
+				"description": "Taşınacak kaynak dosya veya klasör.",
+			},
+			"destination": map[string]interface{}{
+				"type":        "string",
+				"description": "Yeni hedef yol veya yeni isim.",
+			},
+		},
+		"required": []string{"source", "destination"},
+	}
 }
 
 func (c *MovePathCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -93,7 +127,20 @@ type DeletePathCommand struct {
 func (c *DeletePathCommand) Name() string { return "delete_path" }
 
 func (c *DeletePathCommand) Description() string {
-	return "Dosya veya klasörü KALICI olarak siler. 'path' parametresi alır. DİKKAT: Geri alınamaz!"
+	return "Dosya veya klasörü KALICI olarak siler. DİKKAT: Geri alınamaz!"
+}
+
+func (c *DeletePathCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Silinecek dosya veya klasörün yolu.",
+			},
+		},
+		"required": []string{"path"},
+	}
 }
 
 func (c *DeletePathCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -125,7 +172,20 @@ type GetFileInfoCommand struct {
 func (c *GetFileInfoCommand) Name() string { return "get_file_info" }
 
 func (c *GetFileInfoCommand) Description() string {
-	return "Dosya veya klasör hakkında detaylı bilgi (boyut, tarih, izinler) döner. 'path' parametresi alır."
+	return "Dosya veya klasör hakkında detaylı bilgi (boyut, tarih, izinler) döner."
+}
+
+func (c *GetFileInfoCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Bilgisi istenen dosya veya klasörün yolu.",
+			},
+		},
+		"required": []string{"path"},
+	}
 }
 
 func (c *GetFileInfoCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -163,8 +223,8 @@ func (c *GetFileInfoCommand) Execute(ctx context.Context, args map[string]interf
 // --- YARDIMCI FONKSİYONLAR ---
 
 // resolvePath: Absolute veya Relative yolları güvenli şekilde birleştirir
-func (c *CopyPathCommand) resolvePath(p string) string { return resolve(c.BaseDir, p) }
-func (c *MovePathCommand) resolvePath(p string) string { return resolve(c.BaseDir, p) }
+func (c *CopyPathCommand) resolvePath(p string) string   { return resolve(c.BaseDir, p) }
+func (c *MovePathCommand) resolvePath(p string) string   { return resolve(c.BaseDir, p) }
 func (c *DeletePathCommand) resolvePath(p string) string { return resolve(c.BaseDir, p) }
 func (c *GetFileInfoCommand) resolvePath(p string) string { return resolve(c.BaseDir, p) }
 
@@ -197,7 +257,7 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-func copyDir(src string, dst string) error {
+func copyDir(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err

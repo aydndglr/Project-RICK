@@ -21,7 +21,20 @@ type WebSearchCommand struct{}
 func (c *WebSearchCommand) Name() string { return "web_search" }
 
 func (c *WebSearchCommand) Description() string {
-	return "İnternette arama yapar ve ilk 5 sonucu özet olarak döner. 'query' parametresi alır."
+	return "İnternette arama yapar ve ilk 5 sonucu özet olarak döner."
+}
+
+func (c *WebSearchCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"query": map[string]interface{}{
+				"type":        "string",
+				"description": "Aranacak kelime veya cümle.",
+			},
+		},
+		"required": []string{"query"},
+	}
 }
 
 func (c *WebSearchCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -88,7 +101,24 @@ type DownloadFileCommand struct {
 func (c *DownloadFileCommand) Name() string { return "download_file" }
 
 func (c *DownloadFileCommand) Description() string {
-	return "İnternetten dosya indirir. 'url' ve 'filename' (opsiyonel) parametreleri alır."
+	return "İnternetten dosya indirir."
+}
+
+func (c *DownloadFileCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"url": map[string]interface{}{
+				"type":        "string",
+				"description": "İndirilecek dosyanın bağlantısı (URL).",
+			},
+			"filename": map[string]interface{}{
+				"type":        "string",
+				"description": "Kaydedilecek dosya adı (Opsiyonel). Boş bırakılırsa URL'den tahmin edilir.",
+			},
+		},
+		"required": []string{"url"},
+	}
 }
 
 func (c *DownloadFileCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {

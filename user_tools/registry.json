@@ -1,0 +1,7 @@
+[
+  {
+    "description": "Sistemdeki RAM miktarını megabayt cinsinden döner",
+    "name": "get_ram_info",
+    "script": "get_ram_info.py"
+  }
+]

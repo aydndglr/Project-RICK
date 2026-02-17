@@ -22,7 +22,18 @@ type GitStatusCommand struct {
 }
 
 func (c *GitStatusCommand) Name() string { return "git_status" }
-func (c *GitStatusCommand) Description() string { return "Git deposundaki değişiklikleri gösterir." }
+
+func (c *GitStatusCommand) Description() string {
+	return "Git deposundaki güncel değişiklikleri ve dosya durumlarını listeler."
+}
+
+// Parameters: Bu komut argüman almaz.
+func (c *GitStatusCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
 
 func (c *GitStatusCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	out, err := runGit(c.BaseDir, "status")
@@ -39,12 +50,29 @@ type GitCommitCommand struct {
 }
 
 func (c *GitCommitCommand) Name() string { return "git_commit" }
-func (c *GitCommitCommand) Description() string { return "Değişiklikleri ekler ve commit eder. Parametre: message." }
+
+func (c *GitCommitCommand) Description() string {
+	return "Tüm değişiklikleri sahneye ekler (stage) ve bir mesajla commit eder."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *GitCommitCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"message": map[string]interface{}{
+				"type":        "string",
+				"description": "Commit mesajı (örn: 'feat: yeni araç eklendi' veya 'fix: hata düzeltildi').",
+			},
+		},
+		"required": []string{"message"},
+	}
+}
 
 func (c *GitCommitCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	msg, ok := args["message"].(string)
 	if !ok || msg == "" {
-		return "", fmt.Errorf("eksik parametre: message")
+		return "", fmt.Errorf("hata: 'message' parametresi zorunludur")
 	}
 
 	// 1. Hepsini ekle
@@ -68,7 +96,18 @@ type GitHistoryCommand struct {
 }
 
 func (c *GitHistoryCommand) Name() string { return "git_history" }
-func (c *GitHistoryCommand) Description() string { return "Son commit geçmişini gösterir." }
+
+func (c *GitHistoryCommand) Description() string {
+	return "Projedeki son commit geçmişini (log) özetler."
+}
+
+// Parameters: Bu komut argüman almaz.
+func (c *GitHistoryCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
 
 func (c *GitHistoryCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	// Son 5 commiti, tek satır halinde göster

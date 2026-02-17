@@ -15,7 +15,20 @@ type OpenAppCommand struct{}
 func (c *OpenAppCommand) Name() string { return "open_app" }
 
 func (c *OpenAppCommand) Description() string {
-	return "Bilgisayardaki bir uygulamayı başlatır. Parametre: app_name (örn: 'notepad', 'calc', 'chrome')."
+	return "Bilgisayardaki bir uygulamayı başlatır."
+}
+
+func (c *OpenAppCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"app_name": map[string]interface{}{
+				"type":        "string",
+				"description": "Başlatılacak uygulamanın adı (örn: 'notepad', 'calc', 'chrome').",
+			},
+		},
+		"required": []string{"app_name"},
+	}
 }
 
 func (c *OpenAppCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -48,7 +61,20 @@ type KillProcessCommand struct{}
 func (c *KillProcessCommand) Name() string { return "kill_process" }
 
 func (c *KillProcessCommand) Description() string {
-	return "Çalışan bir uygulamayı isminden sonlandırır. Parametre: process_name (örn: 'chrome.exe')."
+	return "Çalışan bir uygulamayı isminden sonlandırır."
+}
+
+func (c *KillProcessCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"process_name": map[string]interface{}{
+				"type":        "string",
+				"description": "Sonlandırılacak işlemin adı (örn: 'chrome.exe').",
+			},
+		},
+		"required": []string{"process_name"},
+	}
 }
 
 func (c *KillProcessCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -82,7 +108,20 @@ type VirusScanCommand struct {
 func (c *VirusScanCommand) Name() string { return "virus_scan" }
 
 func (c *VirusScanCommand) Description() string {
-	return "Belirtilen dosya veya klasörü Windows Defender ile tarar. Parametre: path."
+	return "Belirtilen dosya veya klasörü Windows Defender ile tarar."
+}
+
+func (c *VirusScanCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Taranacak dosya veya klasörün tam yolu.",
+			},
+		},
+		"required": []string{"path"},
+	}
 }
 
 func (c *VirusScanCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {

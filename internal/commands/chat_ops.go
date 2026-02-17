@@ -11,7 +11,21 @@ type ConversationalReplyCommand struct{}
 func (c *ConversationalReplyCommand) Name() string { return "conversational_reply" }
 
 func (c *ConversationalReplyCommand) Description() string {
-	return "Kullanıcı sohbet ediyor, hal hatır soruyor veya işlem gerektirmeyen bir şey söylüyorsa bu aracı kullan. Parametre: 'reply' (Vereceğin cevap)."
+	return "Kullanıcı sohbet ediyor, hal hatır soruyor veya işlem gerektirmeyen bir şey söylüyorsa bu aracı kullan."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *ConversationalReplyCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"reply": map[string]interface{}{
+				"type":        "string",
+				"description": "Kullanıcıya verilecek sözlü cevap.",
+			},
+		},
+		"required": []string{"reply"},
+	}
 }
 
 func (c *ConversationalReplyCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {

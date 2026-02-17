@@ -12,8 +12,27 @@ type CreateFileCommand struct {
 }
 
 func (c *CreateFileCommand) Name() string { return "create_file" }
+
 func (c *CreateFileCommand) Description() string {
-	return "Yeni bir dosya oluşturur ve içeriğini yazar. Tam yol (Absolute Path) verebilirsin. Kullanım: { \"path\": \"C:\\Users\\X\\Desktop\\deneme.txt\", \"content\": \"merhaba\" }"
+	return "Yeni bir dosya oluşturur ve içeriğini yazar. Tam yol (Absolute Path) veya proje içi yol verebilirsin."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *CreateFileCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Oluşturulacak dosyanın yolu (Örn: 'notlar.txt' veya 'C:\\Users\\...').",
+			},
+			"content": map[string]interface{}{
+				"type":        "string",
+				"description": "Dosyaya yazılacak metin içeriği.",
+			},
+		},
+		"required": []string{"path", "content"},
+	}
 }
 
 func (c *CreateFileCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {

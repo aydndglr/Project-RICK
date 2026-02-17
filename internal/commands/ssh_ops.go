@@ -14,16 +14,44 @@ import (
 
 // --- 1. SSH RUN COMMAND ---
 
-type SSHRunCommand struct {}
+type SSHRunCommand struct{}
 
 func (c *SSHRunCommand) Name() string { return "ssh_run" }
 
 func (c *SSHRunCommand) Description() string {
-	return "Uzak sunucuda komut çalıştırır. Parametreler: host (ip:port), user, password (veya key_path), command."
+	return "Uzak bir sunucuya SSH ile bağlanır ve bir komut çalıştırır."
+}
+
+func (c *SSHRunCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"host": map[string]interface{}{
+				"type":        "string",
+				"description": "Sunucu adresi ve portu (Örn: '192.168.1.10:22').",
+			},
+			"user": map[string]interface{}{
+				"type":        "string",
+				"description": "SSH kullanıcı adı.",
+			},
+			"password": map[string]interface{}{
+				"type":        "string",
+				"description": "SSH şifresi (Anahtar kullanılmıyorsa zorunludur).",
+			},
+			"key_path": map[string]interface{}{
+				"type":        "string",
+				"description": "Özel anahtar (Private Key) dosyasının yolu (Opsiyonel).",
+			},
+			"command": map[string]interface{}{
+				"type":        "string",
+				"description": "Uzak sunucuda çalıştırılacak komut.",
+			},
+		},
+		"required": []string{"host", "user", "command"},
+	}
 }
 
 func (c *SSHRunCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	// 1. Parametreleri Al
 	host, _ := args["host"].(string)
 	user, _ := args["user"].(string)
 	pass, _ := args["password"].(string)
@@ -34,14 +62,12 @@ func (c *SSHRunCommand) Execute(ctx context.Context, args map[string]interface{}
 		return "", fmt.Errorf("eksik parametre: host, user ve command zorunludur")
 	}
 
-	// 2. SSH Config Hazırla
 	config := &ssh.ClientConfig{
-		User: user,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Test için host key kontrolünü kapatıyoruz
-		Timeout: 10 * time.Second,
+		User:            user,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         10 * time.Second,
 	}
 
-	// Auth Yöntemini Seç (Şifre mi Key mi?)
 	if keyPath != "" {
 		key, err := os.ReadFile(keyPath)
 		if err != nil {
@@ -56,21 +82,18 @@ func (c *SSHRunCommand) Execute(ctx context.Context, args map[string]interface{}
 		config.Auth = []ssh.AuthMethod{ssh.Password(pass)}
 	}
 
-	// 3. Bağlantıyı Kur
 	client, err := ssh.Dial("tcp", host, config)
 	if err != nil {
 		return "", fmt.Errorf("bağlantı hatası: %v", err)
 	}
 	defer client.Close()
 
-	// 4. Session Oluştur
 	session, err := client.NewSession()
 	if err != nil {
 		return "", fmt.Errorf("oturum açma hatası: %v", err)
 	}
 	defer session.Close()
 
-	// 5. Komutu Çalıştır ve Çıktıyı Yakala
 	var stdout, stderr bytes.Buffer
 	session.Stdout = &stdout
 	session.Stderr = &stderr
@@ -82,69 +105,97 @@ func (c *SSHRunCommand) Execute(ctx context.Context, args map[string]interface{}
 	return fmt.Sprintf("✅ Sunucu Yanıtı (%s):\n%s", host, stdout.String()), nil
 }
 
-// --- 2. SSH UPLOAD COMMAND (SCP Benzeri) ---
+// --- 2. SSH UPLOAD COMMAND ---
 
 type SSHUploadCommand struct {
-    BaseDir string
+	BaseDir string
 }
 
 func (c *SSHUploadCommand) Name() string { return "ssh_upload" }
 
 func (c *SSHUploadCommand) Description() string {
-	return "Yerel dosyayı sunucuya yükler. Parametreler: host, user, password, local_path, remote_path."
+	return "Yerel bir dosyayı uzak sunucuya SCP protokolü ile yükler."
+}
+
+func (c *SSHUploadCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"host": map[string]interface{}{
+				"type":        "string",
+				"description": "Hedef sunucu adresi (IP:Port).",
+			},
+			"user": map[string]interface{}{
+				"type":        "string",
+				"description": "SSH kullanıcı adı.",
+			},
+			"password": map[string]interface{}{
+				"type":        "string",
+				"description": "SSH şifresi.",
+			},
+			"local_path": map[string]interface{}{
+				"type":        "string",
+				"description": "Yüklenecek yerel dosyanın yolu.",
+			},
+			"remote_path": map[string]interface{}{
+				"type":        "string",
+				"description": "Sunucudaki hedef yol (örn: '/home/user/file.txt').",
+			},
+		},
+		"required": []string{"host", "user", "local_path", "remote_path"},
+	}
 }
 
 func (c *SSHUploadCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-    // Parametreler
-    host, _ := args["host"].(string)
-    user, _ := args["user"].(string)
-    pass, _ := args["password"].(string)
-    localPath, _ := args["local_path"].(string)
-    remotePath, _ := args["remote_path"].(string)
+	host, _ := args["host"].(string)
+	user, _ := args["user"].(string)
+	pass, _ := args["password"].(string)
+	localPath, _ := args["local_path"].(string)
+	remotePath, _ := args["remote_path"].(string)
 
-    fullLocalPath := filepath.Join(c.BaseDir, localPath)
-    if filepath.IsAbs(localPath) {
-        fullLocalPath = localPath
-    }
-
-    // Dosyayı Oku
-    file, err := os.Open(fullLocalPath)
-    if err != nil {
-        return "", fmt.Errorf("yerel dosya okunamadı: %v", err)
-    }
-    defer file.Close()
-
-    stat, _ := file.Stat()
-
-    // SSH Bağlantısı (Yukarıdakiyle aynı mantık)
-    config := &ssh.ClientConfig{
-		User: user,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-        Auth: []ssh.AuthMethod{ssh.Password(pass)}, // Basitlik için sadece şifre
-		Timeout: 10 * time.Second,
+	fullLocalPath := filepath.Join(c.BaseDir, localPath)
+	if filepath.IsAbs(localPath) {
+		fullLocalPath = localPath
 	}
 
-    client, err := ssh.Dial("tcp", host, config)
-    if err != nil { return "", err }
-    defer client.Close()
+	file, err := os.Open(fullLocalPath)
+	if err != nil {
+		return "", fmt.Errorf("yerel dosya okunamadı: %v", err)
+	}
+	defer file.Close()
 
-    session, err := client.NewSession()
-    if err != nil { return "", err }
-    defer session.Close()
+	stat, _ := file.Stat()
 
-    // SCP Protokolü ile dosya gönderimi
-    go func() {
-        w, _ := session.StdinPipe()
-        defer w.Close()
-        // SCP header
-        fmt.Fprintln(w, "C0644", stat.Size(), filepath.Base(remotePath))
-        io.Copy(w, file)
-        fmt.Fprint(w, "\x00")
-    }()
+	config := &ssh.ClientConfig{
+		User:            user,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Auth:            []ssh.AuthMethod{ssh.Password(pass)},
+		Timeout:         10 * time.Second,
+	}
 
-    if err := session.Run("/usr/bin/scp -t " + remotePath); err != nil {
-        return "", fmt.Errorf("yükleme başarısız: %v", err)
-    }
+	client, err := ssh.Dial("tcp", host, config)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
 
-    return fmt.Sprintf("✅ Dosya başarıyla yüklendi: %s -> %s:%s", localPath, host, remotePath), nil
+	session, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+
+	go func() {
+		w, _ := session.StdinPipe()
+		defer w.Close()
+		fmt.Fprintln(w, "C0644", stat.Size(), filepath.Base(remotePath))
+		io.Copy(w, file)
+		fmt.Fprint(w, "\x00")
+	}()
+
+	if err := session.Run("/usr/bin/scp -t " + remotePath); err != nil {
+		return "", fmt.Errorf("yükleme başarısız: %v", err)
+	}
+
+	return fmt.Sprintf("✅ Dosya başarıyla yüklendi: %s -> %s:%s", localPath, host, remotePath), nil
 }

@@ -15,7 +15,15 @@ type ListProjectCommand struct {
 func (c *ListProjectCommand) Name() string { return "list_project" }
 
 func (c *ListProjectCommand) Description() string {
-	return "Proje dizin yapısını ve dosyaları ağaç şeklinde listeler. Mevcut workspace içeriğini anlamak için kullanılır."
+	return "Proje dizin yapısını ve dosyaları ağaç şeklinde listeler."
+}
+
+// Parameters: Bu komut argüman almaz, o yüzden boş şema dönüyoruz.
+func (c *ListProjectCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
 }
 
 func (c *ListProjectCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -71,6 +79,7 @@ func (c *ListProjectCommand) shouldIgnore(name string) bool {
 		"vendor",
 		"bin",
 		"rick_whatsapp.db", // Kendi DB'sini okumasın
+		"__pycache__",      // Python cache
 	}
 
 	for _, ignore := range ignoreList {
