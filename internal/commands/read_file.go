@@ -14,7 +14,21 @@ type ReadFileCommand struct {
 func (c *ReadFileCommand) Name() string { return "read_file" }
 
 func (c *ReadFileCommand) Description() string {
-	return "Belirtilen dosyanın içeriğini okur. Kullanım: { \"path\": \"dosya_yolu.go\" }"
+	return "Belirtilen dosyanın içeriğini okur."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *ReadFileCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Okunacak dosyanın yolu (Örn: 'main.go' veya 'internal/config.go').",
+			},
+		},
+		"required": []string{"path"},
+	}
 }
 
 func (c *ReadFileCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {

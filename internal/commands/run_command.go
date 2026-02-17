@@ -14,7 +14,21 @@ type RunCommand struct{}
 func (c *RunCommand) Name() string { return "run_command" }
 
 func (c *RunCommand) Description() string {
-	return "Terminalde sistem komutu çalıştırır. Windows için PowerShell, Linux/Mac için Bash kullanılır. Kullanım: { \"command\": \"go test ./...\" }"
+	return "Terminalde sistem komutu çalıştırır. Windows için PowerShell, Linux/Mac için Bash kullanılır."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *RunCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"command": map[string]interface{}{
+				"type":        "string",
+				"description": "Çalıştırılacak terminal komutu (örn: 'dir', 'ls -la', 'ipconfig').",
+			},
+		},
+		"required": []string{"command"},
+	}
 }
 
 func (c *RunCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {

@@ -39,123 +39,170 @@ func NewAgent(cfg *config.Config, b brain.LLMProvider, reg *tools.Registry, mem 
 		Registry: reg,
 		Memory:   mem,
 		State:    StateThinking,
-		MaxSteps: 20, // Karmaşık görevler için adım sayısı
+		MaxSteps: 20, // Karmaşık görevler için maksimum döngü sayısı
 		History:  []brain.Message{},
 	}
 
-	// 🧠 BAŞLANGIÇ: System Prompt'u bir kere yükle ve hafızada tut.
-	// Böylece her mesajda tekrar tekrar yüklemeyiz.
+	// 🧠 BAŞLANGIÇ: System Prompt'u yükle
 	agent.resetMemoryWithSystemPrompt()
 
 	return agent
 }
 
 // resetMemoryWithSystemPrompt: Hafızayı temizler ve Rick'in kişiliğini yükler.
-func (a *Agent) resetMemoryWithSystemPrompt() {
+//func (a *Agent) resetMemoryWithSystemPrompt() {
+//	toolboxDesc := a.Registry.GetToolboxDescription()
+//	systemPrompt := brain.GetSystemPrompt(toolboxDesc)
+//	
+//	a.History = []brain.Message{
+//		{Role: brain.RoleSystem, Content: systemPrompt},
+//	}
+//}
+
+// refreshSystemPrompt: Mevcut hafızadaki sistem mesajını (History[0]) güncel araç listesiyle tazeler.
+func (a *Agent) refreshSystemPrompt() {
 	toolboxDesc := a.Registry.GetToolboxDescription()
 	systemPrompt := brain.GetSystemPrompt(toolboxDesc)
-
-	// Proje yapısını dinamik olarak her seferinde tazelemek istersek buraya ekleyebiliriz
-	// Şimdilik temel prompt yeterli.
 	
-	a.History = []brain.Message{
-		{Role: brain.RoleSystem, Content: systemPrompt},
+	if len(a.History) > 0 && a.History[0].Role == brain.RoleSystem {
+		a.History[0].Content = systemPrompt
+	} else {
+		// Eğer History boşsa veya ilk mesaj sistem değilse (güvenlik için)
+		a.History = append([]brain.Message{{Role: brain.RoleSystem, Content: systemPrompt}}, a.History...)
 	}
 }
 
-// Run: Artık hafızayı SİLMİYOR, üzerine ekliyor (Continuous Session).
+// resetMemoryWithSystemPrompt: (Mevcut olanı bununla değiştirebilirsin, daha temiz olur)
+func (a *Agent) resetMemoryWithSystemPrompt() {
+	a.History = []brain.Message{} // Önce temizle
+	a.refreshSystemPrompt()      // Sonra güncel haliyle yükle
+}
+
+// Run: (Legacy) Tek seferlik çıktı döner. Artık RunStream kullanılması önerilir.
 func (a *Agent) Run(ctx context.Context, input string) (string, error) {
-	logger.Info("🚀 Girdi: %s", input)
-
-	// --- 1. HAFIZA YÖNETİMİ (Context Window) ---
-	// Eğer hafıza çok şiştiyse eski mesajları buda ama System Prompt'u koru.
-	a.manageContextWindow()
-
-	// --- 2. RAG: UZUN SÜRELİ BELLEK SORGUSU ---
-	// Sadece görev odaklı sorgularda hafızaya bakmak daha verimlidir.
-	if a.Memory != nil && len(input) > 10 {
-		embedding, err := a.Brain.Embed(ctx, input)
-		if err == nil {
-			matches, err := a.Memory.Search(ctx, embedding, 2) // Sadece en alakalı 2 tanesi
-			if err == nil && len(matches) > 0 {
-				contextMsg := "🧠 (Hatırlatma - Long Term Memory):\n"
-				for _, m := range matches {
-					contextMsg += fmt.Sprintf("- %s\n", m.Content)
-				}
-				// Hafızadan gelen bilgiyi System mesajı olarak değil, 
-				// Görünmez bir 'System Note' olarak ekleyelim ki akışı bozmasın.
-				a.History = append(a.History, brain.Message{Role: brain.RoleSystem, Content: contextMsg})
-			}
-		}
+	// Stream kanalını dinleyip son cevabı birleştirip döner (Geriye uyumluluk)
+	streamChan := a.RunStream(ctx, input)
+	var finalOutput string
+	for msg := range streamChan {
+		finalOutput = msg // Son mesajı al
 	}
+	return finalOutput, nil
+}
 
-	// --- 3. KULLANICI MESAJINI EKLE ---
-	a.History = append(a.History, brain.Message{Role: brain.RoleUser, Content: input})
+// RunStream: (v4.0) Cevapları parça parça (chunk) olarak kanal üzerinden gönderir.
+// Bu sayede WhatsApp gibi arayüzler "işlem devam ediyor..." mesajlarını anlık gösterebilir.
+func (a *Agent) RunStream(ctx context.Context, input string) <-chan string {
+	outChan := make(chan string)
 
-	// --- 4. RE-ACT DÖNGÜSÜ ---
-	for i := 0; i < a.MaxSteps; i++ {
-		a.State = StateThinking
-		
-		// Modelin düşünmesini sağla
-		opts := &brain.GenerationOptions{Temperature: 0.1} // Düşük sıcaklık = Daha itaatkar
-		toolDefs := a.Registry.GetToolDefinitions()
+	go func() {
+		defer close(outChan) // İşlem bitince kanalı kapat
 
-		logger.Debug("🔄 Adım %d/%d (Thinking...)", i+1, a.MaxSteps)
-		
-		resp, err := a.Brain.Chat(ctx, a.History, toolDefs, opts)
-		if err != nil {
-			return "", fmt.Errorf("beyin hatası: %v", err)
-		}
+		logger.Info("🚀 Girdi (Stream): %s", input)
 
-		// Asistanın cevabını hafızaya ekle (Bağlam oluşuyor)
-		a.History = append(a.History, resp.Message)
+		a.refreshSystemPrompt()
+		// 1. HAFIZA YÖNETİMİ
+		a.manageContextWindow()
 
-		// --- DURUM A: SOHBET VEYA DİREKT CEVAP ---
-		// Eğer model hiç araç çağırmadıysa ve bir şeyler söylediyse, bu bir sohbettir.
-		if len(resp.Message.ToolCalls) == 0 {
-			if resp.Message.Content != "" {
-				logger.Success("🗣️ Rick: %s", resp.Message.Content)
-				return resp.Message.Content, nil
-			}
-			// Boş döndüyse (Bazen olabiliyor), uyar ve devam et
-			a.History = append(a.History, brain.Message{Role: brain.RoleUser, Content: "Devam et..."})
-			continue
-		}
-
-		// --- DURUM B: ARAÇ KULLANIMI (GÖREV MODU) ---
-		a.State = StateExecuting
-		
-		for _, call := range resp.Message.ToolCalls {
-			// Özel Araçlar: Sohbet ve Bitiş
-			if call.ToolName == "conversational_reply" || call.ToolName == "present_answer" {
-				finalResponse := a.handleFinalTool(call)
-				
-				// Başarılı bir görev sonucunu uzun süreli belleğe kaydet
-				if call.ToolName == "present_answer" && a.Memory != nil {
-					go a.saveToMemory(input, finalResponse)
+		// 2. RAG: UZUN SÜRELİ BELLEK SORGUSU
+		if a.Memory != nil && len(input) > 10 {
+			embedding, err := a.Brain.Embed(ctx, input)
+			if err == nil {
+				matches, err := a.Memory.Search(ctx, embedding, 2)
+				if err == nil && len(matches) > 0 {
+					contextMsg := "🧠 (Hatırlatma - Long Term Memory):\n"
+					for _, m := range matches {
+						contextMsg += fmt.Sprintf("- %s\n", m.Content)
+					}
+					a.History = append(a.History, brain.Message{Role: brain.RoleSystem, Content: contextMsg})
 				}
-				
-				logger.Success("🏁 Tamamlandı: %s", finalResponse)
-				return finalResponse, nil
 			}
+		}
 
-			// Standart Araçları Çalıştır
-			output := a.executeToolSafe(ctx, call)
+		// 3. KULLANICI MESAJINI EKLE
+		a.History = append(a.History, brain.Message{Role: brain.RoleUser, Content: input})
+
+		// 4. RE-ACT DÖNGÜSÜ
+		for i := 0; i < a.MaxSteps; i++ {
+			a.State = StateThinking
 			
-			// Sonucu hafızaya ekle
-			a.addToolResult(call.ID, call.ToolName, output)
-		}
-		
-		// Döngü başa döner, Rick araç çıktılarına göre yeni karar verir.
-	}
+			// Modelin düşünmesini sağla
+			opts := &brain.GenerationOptions{Temperature: 0.1}
+			toolDefs := a.Registry.GetToolDefinitions()
 
-	return "Maksimum adım sayısına ulaşıldı, süreç durduruldu.", nil
+			logger.Debug("🔄 Adım %d/%d (Thinking...)", i+1, a.MaxSteps)
+			
+			// Beyne sor
+			resp, err := a.Brain.Chat(ctx, a.History, toolDefs, opts)
+			if err != nil {
+				outChan <- fmt.Sprintf("💥 Beyin hatası: %v", err)
+				return
+			}
+
+			// Asistanın cevabını hafızaya ekle
+			a.History = append(a.History, resp.Message)
+
+			// --- DURUM A: SOHBET (Araç yok) ---
+			if len(resp.Message.ToolCalls) == 0 {
+				if resp.Message.Content != "" {
+					logger.Success("🗣️ Rick: %s", resp.Message.Content)
+					outChan <- resp.Message.Content // Kullanıcıya ilet
+					return
+				}
+				// Boş döndüyse (Bazen olabiliyor), devam et
+				a.History = append(a.History, brain.Message{Role: brain.RoleUser, Content: "Devam et..."})
+				continue
+			}
+
+			// --- DURUM B: ARAÇ KULLANIMI (GÖREV MODU) ---
+			a.State = StateExecuting
+			
+			for _, call := range resp.Message.ToolCalls {
+				// Özel Araçlar: Sohbet ve Bitiş
+				if call.ToolName == "conversational_reply" || call.ToolName == "present_answer" {
+					finalResponse := a.handleFinalTool(call)
+					
+					// Hafızaya kaydet
+					if call.ToolName == "present_answer" && a.Memory != nil {
+						go a.saveToMemory(input, finalResponse)
+					}
+					
+					logger.Success("🏁 Tamamlandı: %s", finalResponse)
+					outChan <- finalResponse
+					return
+				}
+
+				// ARA BİLDİRİM: Kullanıcıya ne yaptığımızı söyleyelim
+				// "Arka planda virüs taraması başlatıyorum..." gibi.
+				logger.Action("🛠️ Çalışıyor: %s", call.ToolName)
+				// NOT: Her araç için mesaj atmak kullanıcıyı boğabilir. 
+				// Sadece uzun süren "start_task" gibi işlemlerde bilgi vermek daha iyi olabilir.
+				// Ancak şimdilik Rick'in canlı olduğunu hissettirmek için kısa log gönderiyoruz.
+				// outChan <- fmt.Sprintf("⚙️ İşlem yapılıyor: %s...", call.ToolName)
+
+				// Standart Araçları Çalıştır
+				output := a.executeToolSafe(ctx, call)
+				
+				// Sonucu hafızaya ekle
+				a.addToolResult(call.ID, call.ToolName, output)
+
+				// Eğer bu bir 'start_task' ise, kullanıcıya ID bilgisini hemen dönelim
+				if call.ToolName == "start_task" {
+					outChan <- output // "Görev başlatıldı ID: task_123" bilgisini hemen gönder
+					// Döngüyü kırma, belki başka bir şey daha söyleyecektir.
+				}
+			}
+			
+			// Döngü başa döner, Rick araç çıktılarına göre yeni karar verir.
+		}
+
+		outChan <- "⚠️ Maksimum adım sayısına ulaşıldı, süreç durduruldu."
+	}()
+
+	return outChan
 }
 
 // executeToolSafe: Hataya dayanıklı araç çalıştırıcı
 func (a *Agent) executeToolSafe(ctx context.Context, call brain.ToolCall) string {
-	logger.Action("🛠️ Çalışıyor: %s", call.ToolName)
-
 	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 		return fmt.Sprintf("Argüman hatası: %v", err)
@@ -167,7 +214,7 @@ func (a *Agent) executeToolSafe(ctx context.Context, call brain.ToolCall) string
 		return fmt.Sprintf("HATA: %v", err)
 	}
 
-	// Çıktı çok uzunsa konsolu kirletmesin diye kırpıp logla
+	// Logları temiz tut
 	logOutput := output
 	if len(logOutput) > 200 { logOutput = logOutput[:200] + "..." }
 	logger.Success("📉 Sonuç: %s", logOutput)
@@ -180,7 +227,6 @@ func (a *Agent) handleFinalTool(call brain.ToolCall) string {
 	var args map[string]interface{}
 	_ = json.Unmarshal([]byte(call.Arguments), &args)
 
-	// Olası anahtarları kontrol et (Model bazen karıştırabilir)
 	keys := []string{"answer", "reply", "content", "message", "result", "text"}
 	for _, k := range keys {
 		if val, ok := args[k].(string); ok && val != "" {
@@ -188,16 +234,14 @@ func (a *Agent) handleFinalTool(call brain.ToolCall) string {
 		}
 	}
 	
-	// Liste döndüyse birleştir
 	if list, ok := args["results"].([]interface{}); ok {
 		return fmt.Sprintf("%v", list)
 	}
 
-	return "İşlem tamamlandı (Model boş yanıt döndü)."
+	return "İşlem tamamlandı."
 }
 
 func (a *Agent) addToolResult(toolCallID, toolName, content string) {
-	// Hafıza yönetimi için çok büyük çıktıları kırp (Token limitini koru)
 	if len(content) > 3000 {
 		content = content[:3000] + "\n...[Çıktı Kırpıldı]..."
 	}
@@ -212,26 +256,20 @@ func (a *Agent) addToolResult(toolCallID, toolName, content string) {
 
 // manageContextWindow: Hafızayı kayan pencere (Sliding Window) yöntemiyle yönetir.
 func (a *Agent) manageContextWindow() {
-	// Eşik değer: 20 Mesaj
 	if len(a.History) > 20 {
-		// System Prompt (Index 0) her zaman korunmalı!
 		systemMsg := a.History[0]
-		
-		// Son 10 mesajı al (Yakın geçmiş)
 		recentMsgs := a.History[len(a.History)-10:]
 		
-		// Yeni hafızayı oluştur
 		newHistory := []brain.Message{systemMsg}
 		newHistory = append(newHistory, recentMsgs...)
 		
 		a.History = newHistory
-		logger.Warn("🧹 Hafıza optimize edildi (Eski konuşmalar sıkıştırıldı).")
+		logger.Warn("🧹 Hafıza optimize edildi.")
 	}
 }
 
 // saveToMemory: Hafızaya asenkron kayıt yapar
 func (a *Agent) saveToMemory(task, result string) {
-	// Basit görevleri kaydetmeye gerek yok
 	if len(result) < 10 { return }
 
 	saveCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

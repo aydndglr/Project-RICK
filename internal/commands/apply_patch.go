@@ -16,7 +16,29 @@ type ApplyPatchCommand struct {
 func (c *ApplyPatchCommand) Name() string { return "apply_patch" }
 
 func (c *ApplyPatchCommand) Description() string {
-	return "Dosyada metin tabanlı değişiklik yapar. 'search' bloğunu bulur ve 'replace' bloğuyla değiştirir."
+	return "Dosyada metin tabanlı değişiklik yapar. Belirli bir kod bloğunu bulur ve yeni blokla değiştirir."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *ApplyPatchCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Değişiklik yapılacak dosyanın yolu.",
+			},
+			"search": map[string]interface{}{
+				"type":        "string",
+				"description": "Dosya içinde aranacak olan mevcut kod bloğu (Search Block).",
+			},
+			"replace": map[string]interface{}{
+				"type":        "string",
+				"description": "Mevcut bloğun yerine koyulacak yeni kod bloğu (Replace Block).",
+			},
+		},
+		"required": []string{"path", "search", "replace"},
+	}
 }
 
 func (c *ApplyPatchCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -30,10 +52,10 @@ func (c *ApplyPatchCommand) Execute(ctx context.Context, args map[string]interfa
 
 	fullPath := filepath.Join(c.BaseDir, path)
 
-	// YENİ KULLANIM: patcher.NewSmartPatcher
+	// YENİ KULLANIM: patcher.NewSmartPatcher [cite: 213]
 	p := patcher.NewSmartPatcher(c.BaseDir)
 	
-	err := p.Apply(fullPath, searchBlock, replaceBlock)
+	err := p.Apply(fullPath, searchBlock, replaceBlock) 
 	if err != nil {
 		return "", err
 	}
