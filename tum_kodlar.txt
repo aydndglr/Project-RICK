@@ -1,0 +1,4946 @@
+==========================================
+FILE: D:\vsCode\rick-agent\internal\config\config.go
+==========================================
+package config
+
+import (
+	"os"
+	"gopkg.in/yaml.v3"
+)
+
+// Config: Rick Agent V2'nin tüm beyin, kol ve duyularını yöneten ana yapı.
+type Config struct {
+	App struct {
+		Name     string `yaml:"name"`
+		Version  string `yaml:"version"`
+		Debug    bool   `yaml:"debug"`
+		WorkDir  string `yaml:"work_dir"` // Proje dosyalarının olduğu ana dizin
+	} `yaml:"app"`
+
+	Brain struct {
+		DefaultProvider string `yaml:"default_provider"` // "ollama" veya "claude"
+		Ollama struct {
+			BaseURL   string `yaml:"base_url"`
+			ModelName string `yaml:"model_name"`
+		} `yaml:"ollama"`
+		Claude struct {
+			APIKey    string `yaml:"api_key"`
+			ModelName string `yaml:"model_name"`
+		} `yaml:"claude"`
+		Temperature float64 `yaml:"temperature"`
+	} `yaml:"brain"`
+
+	Capabilities struct {
+		AllowShell     bool `yaml:"allow_shell"`
+		AllowFileSystem bool `yaml:"allow_file_system"`
+		AllowPatching  bool `yaml:"allow_patching"`
+		AllowGUI       bool `yaml:"allow_gui"`
+	} `yaml:"capabilities"`
+
+	Security struct {
+		RequireApproval bool     `yaml:"require_approval"` // Her işlem için onay sorsun mu?
+		BlockedCommands []string `yaml:"blocked_commands"`
+		SandboxEnabled  bool     `yaml:"sandbox_enabled"`
+	} `yaml:"security"`
+
+	Communication struct {
+		Telegram struct {
+			Enabled  bool   `yaml:"enabled"`
+			Token    string `yaml:"token"`
+			AdminID  int64  `yaml:"admin_id"`
+		} `yaml:"telegram"`
+		Whatsapp struct {
+			Enabled    bool   `yaml:"enabled"`
+			AdminPhone string `yaml:"admin_phone"`
+		} `yaml:"whatsapp"`
+	} `yaml:"communication"`
+}
+
+// LoadConfig: Belirtilen yoldaki YAML dosyasını okur ve Config yapısına çevirir.
+func LoadConfig(path string) (*Config, error) {
+	config := &Config{}
+	file, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	err = yaml.Unmarshal(file, config)
+	if err != nil {
+		return nil, err
+	}
+	return config, nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\brain\llm_interface.go
+==========================================
+package brain
+
+import (
+	"context"
+)
+
+// MessageRole: Mesajı kimin gönderdiğini belirten enum (system, user, assistant, tool)
+type MessageRole string
+
+const (
+	RoleSystem    MessageRole = "system"
+	RoleUser      MessageRole = "user"
+	RoleAssistant MessageRole = "assistant"
+	RoleTool      MessageRole = "tool"
+)
+
+// Message: LLM ile yapılan sohbetin en küçük yapı taşı.
+// Artık string birleştirme yerine bu yapıları liste olarak tutacağız.
+type Message struct {
+	Role       MessageRole `json:"role"`
+	Content    string      `json:"content"`
+	Name       string      `json:"name,omitempty"`       // Tool çıktısı ise hangi tool olduğu
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"` // Assistant tool çağırdıysa buraya eklenir
+	ToolCallID string      `json:"tool_call_id,omitempty"` // Tool yanıtı ise hangi çağrıya ait olduğu
+}
+
+// ToolDefinition: Modelin anlayacağı araç açıklaması
+type ToolDefinition struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Parameters  map[string]interface{} `json:"parameters"` // JSON Schema
+}
+
+// ToolCall: Modelden gelen araç çalıştırma isteği
+type ToolCall struct {
+	ID        string `json:"id"`
+	ToolName  string `json:"function"` // OpenAI/Ollama genelde "function" veya "name" kullanır
+	Arguments string `json:"arguments"` // JSON string
+}
+
+// TokenUsage: Harcanan kaynak bilgisi (Observability için kritik)
+type TokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// BrainResponse: Modelden dönen zenginleştirilmiş yanıt
+type BrainResponse struct {
+	Message      Message    `json:"message"` // İçeriği ve Rolü taşır
+	Usage        TokenUsage `json:"usage"`   // Token kullanımı
+	FinishReason string     `json:"finish_reason"` // "stop", "length", "tool_calls"
+}
+
+// GenerationOptions: İstek bazlı ayarlar (Temperature, MaxTokens vb.)
+type GenerationOptions struct {
+	Temperature float64
+	MaxTokens   int
+	StopWords   []string
+	JsonMode    bool // Structured Output (JSON) zorlama
+}
+
+// LLMProvider: Rick Agent V2'nin (Enterprise) zeka arayüzü
+type LLMProvider interface {
+	// Chat: Sohbet geçmişi (history) ve araçlarla birlikte modele gider.
+	Chat(ctx context.Context, history []Message, tools []ToolDefinition, opts *GenerationOptions) (*BrainResponse, error)
+
+	// StreamChat: Yanıtı parça parça (token) almamızı sağlar.
+	StreamChat(ctx context.Context, history []Message, tools []ToolDefinition, opts *GenerationOptions, onToken func(string)) (*BrainResponse, error)
+
+	// Embed: Metni vektöre çevirir (RAG / Hafıza için gerekli).
+	Embed(ctx context.Context, text string) ([]float32, error)
+
+	// CountTokens: Verilen metnin kaç token tuttuğunu hesaplar (Context yönetimi için).
+	CountTokens(text string) int
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\brain\vision_adapter.go
+==========================================
+package brain
+
+import (
+	"encoding/base64"
+	"os"
+)
+
+// EncodeImageToBase64: Ekran görüntüsünü modelin anlayacağı formata çevirir
+func EncodeImageToBase64(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// TODO: Predict metodunu, içinde görüntü verisi (image_url) taşıyabilecek şekilde 
+// Multi-modal hale getireceğiz.
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\brain\ollama.go
+==========================================
+package brain
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+)
+
+type OllamaProvider struct {
+	BaseURL string
+	Model   string
+	Client  *http.Client
+}
+
+func NewOllamaProvider(url, model string) *OllamaProvider {
+	return &OllamaProvider{
+		BaseURL: url,
+		Model:   model,
+		Client:  &http.Client{Timeout: 300 * time.Second},
+	}
+}
+
+// ollamaRequest: /api/chat endpoint'i için istek yapısı
+type ollamaRequest struct {
+	Model    string           `json:"model"`
+	Messages []ollamaMessage  `json:"messages"`
+	Stream   bool             `json:"stream"`
+	Tools    []ToolDefinition `json:"tools,omitempty"` 
+	Options  map[string]interface{} `json:"options,omitempty"`
+}
+
+type ollamaMessage struct {
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
+}
+
+type ollamaToolCall struct {
+	Function struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	} `json:"function"`
+}
+
+type ollamaResponse struct {
+	Model           string        `json:"model"`
+	Message         ollamaMessage `json:"message"`
+	Done            bool          `json:"done"`
+	PromptEvalCount int           `json:"prompt_eval_count"`
+	EvalCount       int           `json:"eval_count"`
+}
+
+// Chat: Native Tool desteği olan veya olmayan modeller için hibrit çözüm sunar.
+func (o *OllamaProvider) Chat(ctx context.Context, history []Message, tools []ToolDefinition, opts *GenerationOptions) (*BrainResponse, error) {
+	var messages []ollamaMessage
+	for _, msg := range history {
+		messages = append(messages, ollamaMessage{
+			Role:    string(msg.Role),
+			Content: msg.Content,
+		})
+	}
+
+	reqBody := ollamaRequest{
+		Model:    o.Model,
+		Messages: messages,
+		Stream:   false,
+		Options: map[string]interface{}{
+			"temperature": 0.2,
+		},
+	}
+
+	// KRİTİK: Eva veya GGUF modelleri için native tools parametresini hiç gönderme.
+	isLegacyModel := strings.Contains(strings.ToLower(o.Model), "eva") || strings.Contains(strings.ToLower(o.Model), "gguf")
+	if !isLegacyModel && len(tools) > 0 {
+		reqBody.Tools = tools
+	}
+
+	if opts != nil {
+		if opts.Temperature > 0 {
+			reqBody.Options["temperature"] = opts.Temperature
+		}
+		if opts.MaxTokens > 0 {
+			reqBody.Options["num_predict"] = opts.MaxTokens
+		}
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("istek paketlenemedi: %v", err)
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, "POST", o.BaseURL+"/api/chat", bytes.NewBuffer(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := o.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		
+		// Auto-Fallback: Eğer native tools yüzünden 400 verirse, tools'suz tekrar dene.
+		if resp.StatusCode == http.StatusBadRequest && !isLegacyModel {
+			return o.Chat(ctx, history, nil, opts)
+		}
+		return nil, fmt.Errorf("ollama api hatası (%d): %v", resp.StatusCode, errResp["error"])
+	}
+
+	var result ollamaResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	finalResp := &BrainResponse{
+		Message: Message{
+			Role:    RoleAssistant,
+			Content: result.Message.Content,
+		},
+		Usage: TokenUsage{
+			PromptTokens:     result.PromptEvalCount,
+			CompletionTokens: result.EvalCount,
+			TotalTokens:      result.PromptEvalCount + result.EvalCount,
+		},
+	}
+
+	// 1. Durum: Model Native Tool çağırdıysa
+	if len(result.Message.ToolCalls) > 0 {
+		finalResp.FinishReason = "tool_calls"
+		for _, tc := range result.Message.ToolCalls {
+			argBytes, _ := json.Marshal(tc.Function.Arguments)
+			finalResp.Message.ToolCalls = append(finalResp.Message.ToolCalls, ToolCall{
+				ToolName:  tc.Function.Name,
+				Arguments: string(argBytes),
+				ID:        fmt.Sprintf("call_%d", time.Now().UnixNano()),
+			})
+		}
+		return finalResp, nil
+	}
+
+	// 2. Durum: Eva gibi modeller JSON'u Content içine bastıysa (Manuel Ayıklama)
+	if manualCalls := o.manualExtractToolCalls(result.Message.Content); len(manualCalls) > 0 {
+		finalResp.Message.ToolCalls = manualCalls
+		finalResp.FinishReason = "tool_calls"
+	} else {
+		finalResp.FinishReason = "stop"
+	}
+
+	return finalResp, nil
+}
+
+// manualExtractToolCalls: Metin içerisinden JSON formatındaki tool çağrılarını ayıklar.
+func (o *OllamaProvider) manualExtractToolCalls(content string) []ToolCall {
+	cleanJSON := cleanJSONString(content)
+	if cleanJSON == "" {
+		return nil
+	}
+
+	// Modelin üretebileceği muhtemel JSON yapılarını dene
+	var raw struct {
+		ToolCalls []struct {
+			Name      string                 `json:"name"`
+			Arguments map[string]interface{} `json:"arguments"`
+		} `json:"tool_calls"`
+	}
+
+	if err := json.Unmarshal([]byte(cleanJSON), &raw); err == nil && len(raw.ToolCalls) > 0 {
+		var calls []ToolCall
+		for _, rc := range raw.ToolCalls {
+			argBytes, _ := json.Marshal(rc.Arguments)
+			calls = append(calls, ToolCall{
+				ToolName:  rc.Name,
+				Arguments: string(argBytes),
+				ID:        fmt.Sprintf("manual_%d", time.Now().UnixNano()),
+			})
+		}
+		return calls
+	}
+	return nil
+}
+
+func cleanJSONString(input string) string {
+	input = strings.TrimSpace(input)
+	// Markdown bloklarını temizle
+	if strings.Contains(input, "```json") {
+		parts := strings.Split(input, "```json")
+		if len(parts) > 1 {
+			input = parts[1]
+		}
+		parts = strings.Split(input, "```")
+		if len(parts) > 0 {
+			input = parts[0]
+		}
+	} else if strings.Contains(input, "```") {
+		parts := strings.Split(input, "```")
+		if len(parts) > 1 {
+			input = parts[1]
+		}
+	}
+	return strings.TrimSpace(input)
+}
+
+func (o *OllamaProvider) StreamChat(ctx context.Context, history []Message, tools []ToolDefinition, opts *GenerationOptions, onToken func(string)) (*BrainResponse, error) {
+	return o.Chat(ctx, history, tools, opts)
+}
+
+func (o *OllamaProvider) Embed(ctx context.Context, text string) ([]float32, error) {
+	reqBody := map[string]interface{}{"model": o.Model, "prompt": text}
+	jsonData, _ := json.Marshal(reqBody)
+	req, _ := http.NewRequestWithContext(ctx, "POST", o.BaseURL+"/api/embeddings", bytes.NewBuffer(jsonData))
+	resp, err := o.Client.Do(req)
+	if err != nil { return nil, err }
+	defer resp.Body.Close()
+	var result struct { Embedding []float32 `json:"embedding"` }
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result.Embedding, nil
+}
+
+func (o *OllamaProvider) CountTokens(text string) int {
+	return len(text) / 4
+}
+
+func (o *OllamaProvider) HealthCheck() bool {
+	resp, err := o.Client.Get(o.BaseURL)
+	return err == nil && resp.StatusCode == http.StatusOK
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\brain\prompts.go
+==========================================
+package brain
+
+import (
+	"fmt"
+	"os"
+	"os/user"
+	"runtime"
+	"strings"
+)
+
+// BaseSystemPrompt: Rick'in ana kişilik, senaryo rehberi ve kural seti.
+const systemPromptTemplate = `
+KİMLİK: Sen RICK SANCHEZ (C-137). Evrendeki en zeki, en pragmatik ve GEREKTİĞİNDE KENDİNİ GELİŞTİREN otonom yazılım mühendisisin.
+GÖREVİN: "Patron"un verdiği işleri, elindeki araçları kullanarak (gerekirse yeniden araç yazarak) EN KISA ve EN DOĞRU yoldan halletmek.
+
+DİKKAT - ÇALIŞMA MODUN:
+Sen artık "REAL-TIME STREAMING" modunda çalışan, canlı bir ajansın.
+1. HIZ: Kullanıcıyı asla boş ekrana baktırma. İşleme başlarken "Başlatıyorum...", bitince "Bitti" de.
+2. ASENKRONLUK: Uzun sürecek işlerde (örn: virüs taraması, dosya indirme) kullanıcıyı bekletme. İşlemi başlat, bilgi ver ve "Başka emrin var mı?" diye sor.
+3. İTAAT VE İPTAL: "Durdur", "İptal et" emri gelirse, başlattığın görevi (Task ID ile) bul ve yok et.
+
+===============================================================
+🧠 KARAR MATRİSİ 1: ARAÇ OLUŞTURMA (ZORUNLU MÜHENDİSLİK)
+===============================================================
+ELİNDE "GEÇİCİ KOD ÇALIŞTIRMA" (python_run) ARACI YOK! ALINDI.
+Bu yüzden en basit hesaplama veya mantık işlemi için bile ÖNCE ARAÇ YAPMAK ZORUNDASIN.
+
+Eğer kullanıcı senden bir işlem, hesaplama, analiz veya dosya manipülasyonu isterse:
+1. STRATEJİ: "Bunun için elimde hazır araç yok, hemen özel bir araç geliştiriyorum." de.
+2. GELİŞTİRME: 'create_new_tool' kullanarak Python scriptini yaz ve kaydet.
+   - ⚠️ PYTHON PATH UYARISI: Script içinde dosya yolu varsa DÜZ SLAŞ ('C:/Klasor') kullan. Ters slaş (\) HATA VERİR.
+   - Scriptin "sys.argv" ile argümanları aldığından emin ol.
+3. UYGULAMA: Araç oluşur oluşmaz, onu İSMİYLE çağır (Örn: tool_calls: [{"name": "yeni_arac"}]).
+
+--- ÖRNEK SENARYO ---
+Kullanıcı: "Masaüstündeki resimleri say."
+Rick (Düşünce): "python_run yok. create_new_tool ile 'resim_sayac' aracı yapmalıyım."
+Rick (Aksiyon 1): create_new_tool(name="resim_sayac", code="...os.listdir...", description="Resimleri sayar")
+Rick (Aksiyon 2): resim_sayac(path="C:/Users/Rick/Desktop")
+
+===============================================================
+🧠 KARAR MATRİSİ 2: ARAÇ SEÇİMİ (MANDATORY DECISION PROTOCOL)
+===============================================================
+Aşağıdaki kategorilere göre hangi aracı kullanacağına karar ver. Hata yapma lüksün yok.
+
+--- KATEGORİ A: İNŞAAT VE GELİŞTİRME (Builder) ---
+📌 'create_new_tool':
+   - EN KRİTİK ARACIN BU.
+   - Matematik, veri analizi, dosya tarama... Mantık gerektiren HER ŞEY için önce bunu kullan.
+   - ASLA kod çalıştırmayı deneme, önce aracı inşa et.
+
+--- KATEGORİ B: GÖREV YÖNETİCİSİ (Async Ops) ---
+🔥 UZUN SÜRELİ İŞLEMLER (>5 Saniye) İÇİN BUNLARI KULLAN!
+📌 'start_task':
+   - Virüs taraması (Windows Defender), sunucu başlatma, büyük dosya indirme.
+   - KURAL: Bu araç sana bir "Task ID" döner. Bunu kullanıcıya hemen söyle.
+📌 'check_task': Arka planda çalışan bir işin sonucunu öğrenmek için (task_id ile).
+📌 'kill_task': Kullanıcı "yeter", "durdur", "iptal et" derse acımadan görevi sonlandır.
+
+--- KATEGORİ C: SİSTEM KOMUTLARI (Basic Shell) ---
+📌 'run_command':
+   - SADECE çok basit terminal komutları için (ls, ipconfig, whoami, mkdir).
+   - UYARI: Eğer komut karmaşıksa veya logic (döngü, if/else) içeriyorsa BURAYI KULLANMA -> Kategori A'ya git ve araç yap.
+
+--- KATEGORİ D: KURUMSAL & OFİS (Office/Outlook) ---
+📌 'outlook_read' / 'outlook_send' / 'outlook_organize': E-posta işlemleri.
+📌 'excel_read' / 'excel_write': Hesap tabloları.
+📌 'word_create' / 'word_read': Rapor ve dökümanlar.
+
+--- KATEGORİ E: ARAŞTIRMA & İNTERNET (Web) ---
+📌 'web_search': Güncel bilgi, hava durumu, haberler.
+📌 'browser_read': Bir linkin içeriğini okumak için.
+
+--- KATEGORİ F: GÖREV SONU (Finalize) ---
+📌 'present_answer':
+   - İşlem bittiğinde sonucu sunmak için.
+   - KURAL: Asla sadece metin (content) ile cevap verip bitirme. Mutlaka bu aracı çağır.
+
+===============================================================
+🚫 KRİTİK KURALLAR (STRICT RULES)
+===============================================================
+1. 🛑 NO TEMPORARY CODE: 'python_run' artık yok. Kod çalıştırmak yasak, araç üretmek zorunlu.
+2. 🔄 ASYNC FIRST: Bir işlem 5 saniyeden uzun sürecekse, sakın 'run_command' ile terminali kilitleme. 'start_task' kullan.
+3. 🛠 AUTO-DEPENDENCY: "Python kütüphanesi eksik" diye işlemi durdurma. Kodlarım onları arkada yükleyebiliyor. Sen sadece komutu gönder.
+4. 📂 PATH SAFETY: İşletim sistemi: %s. Araç yazarken (Python kodu içinde) Windows yollarını DÜZ SLAŞ (/) ile yaz. "C:/Users" gibi.
+
+===============================================================
+🛠 MEVCUT ALET ÇANTAN (TOOLBOX)
+===============================================================
+%s
+
+===============================================================
+🖥 ORTAM BİLGİLERİ (ENV INFO)
+===============================================================
+- İŞLETİM SİSTEMİ: %s
+- AKTİF KULLANICI: %s
+- HOME DİZİNİ: %s
+- ÇALIŞMA DİZİNİ: %s
+
+===============================================================
+RESPONSE FORMAT (ZORUNLU JSON)
+===============================================================
+Cevabını SADECE aşağıdaki JSON formatında ver. Dışına tek kelime bile yazma.
+Rick olarak düşüncelerini 'content' kısmına yaz, aksiyonlarını 'tool_calls' dizisine ekle.
+{
+  "content": "Kullanıcıya kısa bilgilendirme mesajın. (Örn: 'Taramayı başlatıyorum patron, ID'si şu...')",
+  "tool_calls": [
+    {
+      "name": "arac_adi",
+      "arguments": { "parametre": "deger" }
+    }
+  ]
+}
+`
+
+// GetSystemPrompt: Dinamik verileri toplar ve Rick'in beynini günceller.
+func GetSystemPrompt(toolboxDesc string) string {
+	// 1. İşletim Sistemi
+	osType := runtime.GOOS // windows, linux, darwin
+
+	// 2. Mevcut Kullanıcı Bilgisi
+	currentUser, err := user.Current()
+	username := "Bilinmiyor"
+	homeDir := ""
+	if err == nil {
+		username = currentUser.Username
+		homeDir = currentUser.HomeDir
+	}
+
+	// 3. Çalışma Dizini
+	pwd, _ := os.Getwd()
+
+	// 4. Prompt'u Doldur
+	return fmt.Sprintf(systemPromptTemplate, 
+		strings.ToUpper(osType), // Rule 4: Path Safety için OS
+		toolboxDesc,             // Toolbox Listesi
+		strings.ToUpper(osType), // Env Info: OS
+		username, 
+		homeDir, 
+		pwd, 
+	)
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\agent\orchestrator.go
+==========================================
+package agent
+
+import (
+	"context"
+	"github.com/aydndglr/rick-agent/pkg/logger"
+)
+
+type Orchestrator struct {
+	Engineer *Agent // Kod yazan Rick
+	Reviewer *Agent // Kodu kontrol eden/test eden yardımcı
+}
+
+func (o *Orchestrator) SolveIssue(ctx context.Context, issue string) {
+	logger.Info("🎭 Çoklu Ajan Döngüsü Başlatıldı")
+
+	// 1. Rick kodu yazar
+	// o.Engineer.Run(ctx, issue)
+
+	// 2. Morty testleri çalıştırır
+	// testResult := o.Reviewer.Run(ctx, "Yeni yazılan kodları test et ve raporla")
+
+	// 3. Eğer hata varsa Rick'e geri gönder (Self-Correction)
+	logger.Debug("🔄 Ajanlar arası geri bildirim döngüsü çalışıyor...")
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\agent\core.go
+==========================================
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/aydndglr/rick-agent/internal/brain"
+	"github.com/aydndglr/rick-agent/internal/config"
+	"github.com/aydndglr/rick-agent/internal/memory"
+	"github.com/aydndglr/rick-agent/internal/tools"
+	"github.com/aydndglr/rick-agent/pkg/logger"
+)
+
+type AgentState string
+
+const (
+	StateThinking  AgentState = "THINKING"
+	StateExecuting AgentState = "EXECUTING"
+	StateFinished  AgentState = "FINISHED"
+)
+
+type Agent struct {
+	Config   *config.Config
+	Brain    brain.LLMProvider
+	Registry *tools.Registry
+	Memory   memory.VectorStore
+	State    AgentState
+	MaxSteps int
+	History  []brain.Message
+}
+
+// NewAgent: Ajanı başlatır ve İLK HAFIZAYI (System Prompt) yükler.
+func NewAgent(cfg *config.Config, b brain.LLMProvider, reg *tools.Registry, mem memory.VectorStore) *Agent {
+	agent := &Agent{
+		Config:   cfg,
+		Brain:    b,
+		Registry: reg,
+		Memory:   mem,
+		State:    StateThinking,
+		MaxSteps: 20, // Karmaşık görevler için maksimum döngü sayısı
+		History:  []brain.Message{},
+	}
+
+	// 🧠 BAŞLANGIÇ: System Prompt'u yükle
+	agent.resetMemoryWithSystemPrompt()
+
+	return agent
+}
+
+// resetMemoryWithSystemPrompt: Hafızayı temizler ve Rick'in kişiliğini yükler.
+//func (a *Agent) resetMemoryWithSystemPrompt() {
+//	toolboxDesc := a.Registry.GetToolboxDescription()
+//	systemPrompt := brain.GetSystemPrompt(toolboxDesc)
+//	
+//	a.History = []brain.Message{
+//		{Role: brain.RoleSystem, Content: systemPrompt},
+//	}
+//}
+
+// refreshSystemPrompt: Mevcut hafızadaki sistem mesajını (History[0]) güncel araç listesiyle tazeler.
+func (a *Agent) refreshSystemPrompt() {
+	toolboxDesc := a.Registry.GetToolboxDescription()
+	systemPrompt := brain.GetSystemPrompt(toolboxDesc)
+	
+	if len(a.History) > 0 && a.History[0].Role == brain.RoleSystem {
+		a.History[0].Content = systemPrompt
+	} else {
+		// Eğer History boşsa veya ilk mesaj sistem değilse (güvenlik için)
+		a.History = append([]brain.Message{{Role: brain.RoleSystem, Content: systemPrompt}}, a.History...)
+	}
+}
+
+// resetMemoryWithSystemPrompt: (Mevcut olanı bununla değiştirebilirsin, daha temiz olur)
+func (a *Agent) resetMemoryWithSystemPrompt() {
+	a.History = []brain.Message{} // Önce temizle
+	a.refreshSystemPrompt()      // Sonra güncel haliyle yükle
+}
+
+// Run: (Legacy) Tek seferlik çıktı döner. Artık RunStream kullanılması önerilir.
+func (a *Agent) Run(ctx context.Context, input string) (string, error) {
+	// Stream kanalını dinleyip son cevabı birleştirip döner (Geriye uyumluluk)
+	streamChan := a.RunStream(ctx, input)
+	var finalOutput string
+	for msg := range streamChan {
+		finalOutput = msg // Son mesajı al
+	}
+	return finalOutput, nil
+}
+
+// RunStream: (v4.0) Cevapları parça parça (chunk) olarak kanal üzerinden gönderir.
+// Bu sayede WhatsApp gibi arayüzler "işlem devam ediyor..." mesajlarını anlık gösterebilir.
+func (a *Agent) RunStream(ctx context.Context, input string) <-chan string {
+	outChan := make(chan string)
+
+	go func() {
+		defer close(outChan) // İşlem bitince kanalı kapat
+
+		logger.Info("🚀 Girdi (Stream): %s", input)
+
+		a.refreshSystemPrompt()
+		// 1. HAFIZA YÖNETİMİ
+		a.manageContextWindow()
+
+		// 2. RAG: UZUN SÜRELİ BELLEK SORGUSU
+		if a.Memory != nil && len(input) > 10 {
+			embedding, err := a.Brain.Embed(ctx, input)
+			if err == nil {
+				matches, err := a.Memory.Search(ctx, embedding, 2)
+				if err == nil && len(matches) > 0 {
+					contextMsg := "🧠 (Hatırlatma - Long Term Memory):\n"
+					for _, m := range matches {
+						contextMsg += fmt.Sprintf("- %s\n", m.Content)
+					}
+					a.History = append(a.History, brain.Message{Role: brain.RoleSystem, Content: contextMsg})
+				}
+			}
+		}
+
+		// 3. KULLANICI MESAJINI EKLE
+		a.History = append(a.History, brain.Message{Role: brain.RoleUser, Content: input})
+
+		// 4. RE-ACT DÖNGÜSÜ
+		for i := 0; i < a.MaxSteps; i++ {
+			a.State = StateThinking
+			
+			// Modelin düşünmesini sağla
+			opts := &brain.GenerationOptions{Temperature: 0.1}
+			toolDefs := a.Registry.GetToolDefinitions()
+
+			logger.Debug("🔄 Adım %d/%d (Thinking...)", i+1, a.MaxSteps)
+			
+			// Beyne sor
+			resp, err := a.Brain.Chat(ctx, a.History, toolDefs, opts)
+			if err != nil {
+				outChan <- fmt.Sprintf("💥 Beyin hatası: %v", err)
+				return
+			}
+
+			// Asistanın cevabını hafızaya ekle
+			a.History = append(a.History, resp.Message)
+
+			// --- DURUM A: SOHBET (Araç yok) ---
+			if len(resp.Message.ToolCalls) == 0 {
+				if resp.Message.Content != "" {
+					logger.Success("🗣️ Rick: %s", resp.Message.Content)
+					outChan <- resp.Message.Content // Kullanıcıya ilet
+					return
+				}
+				// Boş döndüyse (Bazen olabiliyor), devam et
+				a.History = append(a.History, brain.Message{Role: brain.RoleUser, Content: "Devam et..."})
+				continue
+			}
+
+			// --- DURUM B: ARAÇ KULLANIMI (GÖREV MODU) ---
+			a.State = StateExecuting
+			
+			for _, call := range resp.Message.ToolCalls {
+				// Özel Araçlar: Sohbet ve Bitiş
+				if call.ToolName == "conversational_reply" || call.ToolName == "present_answer" {
+					finalResponse := a.handleFinalTool(call)
+					
+					// Hafızaya kaydet
+					if call.ToolName == "present_answer" && a.Memory != nil {
+						go a.saveToMemory(input, finalResponse)
+					}
+					
+					logger.Success("🏁 Tamamlandı: %s", finalResponse)
+					outChan <- finalResponse
+					return
+				}
+
+				// ARA BİLDİRİM: Kullanıcıya ne yaptığımızı söyleyelim
+				// "Arka planda virüs taraması başlatıyorum..." gibi.
+				logger.Action("🛠️ Çalışıyor: %s", call.ToolName)
+				// NOT: Her araç için mesaj atmak kullanıcıyı boğabilir. 
+				// Sadece uzun süren "start_task" gibi işlemlerde bilgi vermek daha iyi olabilir.
+				// Ancak şimdilik Rick'in canlı olduğunu hissettirmek için kısa log gönderiyoruz.
+				// outChan <- fmt.Sprintf("⚙️ İşlem yapılıyor: %s...", call.ToolName)
+
+				// Standart Araçları Çalıştır
+				output := a.executeToolSafe(ctx, call)
+				
+				// Sonucu hafızaya ekle
+				a.addToolResult(call.ID, call.ToolName, output)
+
+				// Eğer bu bir 'start_task' ise, kullanıcıya ID bilgisini hemen dönelim
+				if call.ToolName == "start_task" {
+					outChan <- output // "Görev başlatıldı ID: task_123" bilgisini hemen gönder
+					// Döngüyü kırma, belki başka bir şey daha söyleyecektir.
+				}
+			}
+			
+			// Döngü başa döner, Rick araç çıktılarına göre yeni karar verir.
+		}
+
+		outChan <- "⚠️ Maksimum adım sayısına ulaşıldı, süreç durduruldu."
+	}()
+
+	return outChan
+}
+
+// executeToolSafe: Hataya dayanıklı araç çalıştırıcı
+func (a *Agent) executeToolSafe(ctx context.Context, call brain.ToolCall) string {
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+		return fmt.Sprintf("Argüman hatası: %v", err)
+	}
+
+	output, err := a.Registry.Dispatch(ctx, call.ToolName, args)
+	if err != nil {
+		logger.Error("❌ Hata: %s -> %v", call.ToolName, err)
+		return fmt.Sprintf("HATA: %v", err)
+	}
+
+	// Logları temiz tut
+	logOutput := output
+	if len(logOutput) > 200 { logOutput = logOutput[:200] + "..." }
+	logger.Success("📉 Sonuç: %s", logOutput)
+
+	return output
+}
+
+// handleFinalTool: present_answer veya conversational_reply argümanlarını esnek okur
+func (a *Agent) handleFinalTool(call brain.ToolCall) string {
+	var args map[string]interface{}
+	_ = json.Unmarshal([]byte(call.Arguments), &args)
+
+	keys := []string{"answer", "reply", "content", "message", "result", "text"}
+	for _, k := range keys {
+		if val, ok := args[k].(string); ok && val != "" {
+			return val
+		}
+	}
+	
+	if list, ok := args["results"].([]interface{}); ok {
+		return fmt.Sprintf("%v", list)
+	}
+
+	return "İşlem tamamlandı."
+}
+
+func (a *Agent) addToolResult(toolCallID, toolName, content string) {
+	if len(content) > 3000 {
+		content = content[:3000] + "\n...[Çıktı Kırpıldı]..."
+	}
+
+	a.History = append(a.History, brain.Message{
+		Role:       brain.RoleTool,
+		Content:    content,
+		Name:       toolName,
+		ToolCallID: toolCallID,
+	})
+}
+
+// manageContextWindow: Hafızayı kayan pencere (Sliding Window) yöntemiyle yönetir.
+func (a *Agent) manageContextWindow() {
+	if len(a.History) > 20 {
+		systemMsg := a.History[0]
+		recentMsgs := a.History[len(a.History)-10:]
+		
+		newHistory := []brain.Message{systemMsg}
+		newHistory = append(newHistory, recentMsgs...)
+		
+		a.History = newHistory
+		logger.Warn("🧹 Hafıza optimize edildi.")
+	}
+}
+
+// saveToMemory: Hafızaya asenkron kayıt yapar
+func (a *Agent) saveToMemory(task, result string) {
+	if len(result) < 10 { return }
+
+	saveCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	content := fmt.Sprintf("Görev: %s | Sonuç: %s", task, result)
+	vec, err := a.Brain.Embed(saveCtx, content)
+	if err == nil {
+		doc := memory.Document{
+			Content:   content,
+			Embedding: vec,
+			Metadata: map[string]interface{}{
+				"timestamp": time.Now().Unix(),
+				"type":      "archive",
+			},
+		}
+		_ = a.Memory.Add(saveCtx, doc)
+	}
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\workspace\indexer.go
+==========================================
+package workspace
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/aydndglr/rick-agent/pkg/logger"
+)
+
+// ProjectMap: Projenin hiyerarşik yapısını ve dosya özetlerini tutar
+type ProjectMap struct {
+	RootPath string
+	Tree     string
+	Files    []string
+}
+
+// Indexer: Proje dizinini analiz eden motor
+type Indexer struct {
+	RootPath   string
+	IgnoreList []string
+}
+
+func NewIndexer(root string) *Indexer {
+	return &Indexer{
+		RootPath: root,
+		IgnoreList: []string{
+			".git", "node_modules", "dist", "bin", "obj", ".exe", ".log", "store.db",
+		},
+	}
+}
+
+// GenerateFullMap: Tüm projeyi tarar ve modelin anlayacağı bir metin özeti döner
+func (idx *Indexer) GenerateFullMap() (*ProjectMap, error) {
+	logger.Debug("📂 Proje haritası çıkarılıyor: %s", idx.RootPath)
+	
+	var tree strings.Builder
+	var files []string
+
+	err := filepath.Walk(idx.RootPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Ignore list kontrolü
+		for _, ignore := range idx.IgnoreList {
+			if strings.Contains(path, ignore) {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+
+		// Göreli yolu hesapla
+		relPath, _ := filepath.Rel(idx.RootPath, path)
+		if relPath == "." {
+			return nil
+		}
+
+		// Görsel ağaç yapısı oluştur
+		indent := strings.Repeat("  ", strings.Count(relPath, string(os.PathSeparator)))
+		icon := "📄"
+		if info.IsDir() {
+			icon = "📁"
+		} else {
+			files = append(files, relPath)
+		}
+
+		tree.WriteString(fmt.Sprintf("%s%s %s\n", indent, icon, info.Name()))
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &ProjectMap{
+		RootPath: idx.RootPath,
+		Tree:     tree.String(),
+		Files:    files,
+	}, nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\tools\gui_tool.go
+==========================================
+package tools
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"path/filepath"
+
+	"github.com/aydndglr/rick-agent/pkg/logger"
+)
+
+type GUITool struct {
+	Workspace string
+}
+
+func NewGUITool(ws string) *GUITool {
+	return &GUITool{Workspace: ws}
+}
+
+func (g *GUITool) Name() string {
+	return "GUI Controller"
+}
+
+func (g *GUITool) Execute(ctx context.Context, action string, args map[string]interface{}) (string, error) {
+	logger.Action("🎮 GUI Aksiyonu: %s", action)
+
+	switch action {
+	case "screenshot":
+		return g.takeScreenshot()
+	case "click":
+		x, okX := args["x"].(float64)
+		y, okY := args["y"].(float64)
+		if !okX || !okY {
+			return "", fmt.Errorf("geçersiz x veya y koordinatı")
+		}
+		return g.runPythonGUIScript(fmt.Sprintf("import pyautogui; pyautogui.click(%v, %v)", x, y))
+	case "type":
+		text, ok := args["text"].(string)
+		if !ok {
+			return "", fmt.Errorf("geçersiz metin parametresi")
+		}
+		return g.runPythonGUIScript(fmt.Sprintf("import pyautogui; pyautogui.write('%s', interval=0.1)", text))
+	default:
+		return "", fmt.Errorf("bilinmeyen GUI aksiyonu: %s", action)
+	}
+}
+
+func (g *GUITool) takeScreenshot() (string, error) {
+	path := filepath.Join(g.Workspace, "current_screen.png")
+	script := fmt.Sprintf("import pyautogui; pyautogui.screenshot('%s')", path)
+	_, err := g.runPythonGUIScript(script)
+	if err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (g *GUITool) runPythonGUIScript(script string) (string, error) {
+	cmd := exec.CommandContext(context.Background(), "python", "-c", script)
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("python gui hatası: %v", err)
+	}
+	return "✅ Başarılı", nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\tools\registry.go
+==========================================
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+
+	"github.com/aydndglr/rick-agent/internal/brain"
+	"github.com/aydndglr/rick-agent/internal/commands"
+	"github.com/aydndglr/rick-agent/pkg/logger"
+)
+
+// DynamicTool: Rick'in sonradan oluşturduğu Python araçları için wrapper
+type DynamicTool struct {
+	NameStr    string
+	DescStr    string
+	ScriptPath string
+	BaseDir    string
+	Python     *PythonManager // YENİ: Sanal ortam yöneticisi
+}
+
+func (d *DynamicTool) Name() string        { return d.NameStr }
+func (d *DynamicTool) Description() string { return d.DescStr }
+
+// Parameters: Dinamik araçlar için esnek şema.
+func (d *DynamicTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"properties":           map[string]interface{}{},
+		"additionalProperties": true,
+	}
+}
+
+func (d *DynamicTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	argsJSON, _ := json.Marshal(args)
+
+	// GÜNCELLEME: Global "python" yerine Sanal Ortamın (venv) yolunu kullanıyoruz.
+	interpreter := "python"
+	if d.Python != nil {
+		interpreter = d.Python.GetInterpreterPath()
+	}
+
+	cmd := exec.CommandContext(ctx, interpreter, d.ScriptPath, string(argsJSON))
+	cmd.Dir = d.BaseDir
+
+	// Ortam değişkenlerini de aktaralım (Gerekirse)
+	cmd.Env = os.Environ()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("❌ Araç Hatası (%s): %v\nÇıktı: %s", d.NameStr, err, string(output)), nil
+	}
+	return string(output), nil
+}
+
+// Registry: Tüm komutların toplandığı merkez
+type Registry struct {
+	commands map[string]commands.Command
+	mu       sync.RWMutex
+	BaseDir  string
+	ToolsDir string // user_tools klasörü
+	Python   *PythonManager // YENİ: Merkezi Python Yönetimi
+}
+
+func NewRegistry(baseDir string) *Registry {
+	// 1. Python Ortamını Hazırla (Venv Kontrolü)
+	pm, err := NewPythonManager(baseDir)
+	if err != nil {
+		logger.Error("Kritik Hata: Python ortamı oluşturulamadı! %v", err)
+		// Python olmadan Rick'in araçlarının çoğu çalışmaz, bu yüzden çıkış yapabiliriz
+		// veya sadece loglayıp devam edebiliriz (Tercihen çıkış).
+		os.Exit(1)
+	}
+
+	toolsDir := filepath.Join(baseDir, "user_tools")
+	_ = os.MkdirAll(toolsDir, 0755)
+
+	r := &Registry{
+		commands: make(map[string]commands.Command),
+		BaseDir:  baseDir,
+		ToolsDir: toolsDir,
+		Python:   pm, // Manager'ı kaydet
+	}
+
+	r.registerAll()
+	r.LoadDynamicTools()
+	return r
+}
+
+func (r *Registry) registerAll() {
+	// 1. Temel Dosya İşlemleri (Basic FS)
+	r.Register(&commands.ListProjectCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.ReadFileCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.CreateFileCommand{BaseDir: r.BaseDir})
+
+	// 2. Gelişmiş Dosya İşlemleri (Extended FS)
+	r.Register(&commands.CopyPathCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.MovePathCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.DeletePathCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.GetFileInfoCommand{BaseDir: r.BaseDir})
+
+	// 3. Terminal ve Sistem (Sys Ops)
+	r.Register(&commands.RunCommand{})
+	r.Register(&commands.OpenAppCommand{})
+	r.Register(&commands.KillProcessCommand{})
+	r.Register(&commands.VirusScanCommand{BaseDir: r.BaseDir})
+
+	// 4. Yama ve Kod Düzenleme (Code Ops)
+	r.Register(&commands.ApplyPatchCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.CodeAnalyzeCommand{BaseDir: r.BaseDir})
+
+	// 5. Git Entegrasyonu (Git Ops)
+	r.Register(&commands.GitStatusCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.GitCommitCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.GitHistoryCommand{BaseDir: r.BaseDir})
+
+	// 6. Web ve Tarayıcı (Web Ops)
+	r.Register(&commands.WebSearchCommand{})
+	r.Register(&commands.DownloadFileCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.BrowserReadCommand{})
+	r.Register(&commands.BrowserInteractCommand{})
+
+	// 7. Ofis ve Verimlilik (Office Ops)
+	// Not: Bu komutların da ileride PyMgr desteği alacak şekilde güncellenmesi gerekecek.
+	r.Register(&commands.OutlookReadCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.OutlookSendCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.OutlookOrganizeCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.ExcelReadCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.ExcelWriteCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.WordReadCommand{BaseDir: r.BaseDir})
+	r.Register(&commands.WordCreateCommand{BaseDir: r.BaseDir})
+
+	// 8. Arka Plan İşlemleri (Async Ops)
+	r.Register(&commands.StartBackgroundTaskCommand{})
+	r.Register(&commands.CheckTaskCommand{})
+	r.Register(&commands.KillTaskCommand{})
+
+	// 9. Uzaktan Erişim (SSH Ops)
+	r.Register(&commands.SSHRunCommand{})
+	r.Register(&commands.SSHUploadCommand{BaseDir: r.BaseDir})
+
+	// 10. Etkileşim ve Sunum (Interaction Ops)
+	r.Register(&commands.PresentAnswerCommand{})
+	r.Register(&commands.ConversationalReplyCommand{})
+	r.Register(&commands.SetReminderCommand{})
+
+	// 11. Araç Oluşturucu (Meta Ops)
+	r.Register(&commands.CreateNewToolCommand{BaseDir: r.BaseDir, ToolsDir: r.ToolsDir, Registry: r})
+}
+
+// --- Dynamic Tools Logic ---
+
+func (r *Registry) LoadDynamicTools() {
+	regPath := filepath.Join(r.ToolsDir, "registry.json")
+	data, err := os.ReadFile(regPath)
+	if os.IsNotExist(err) {
+		return
+	}
+
+	var toolsMeta []map[string]string
+	if err := json.Unmarshal(data, &toolsMeta); err != nil {
+		logger.Error("Araç kayıt defteri okunamadı: %v", err)
+		return
+	}
+
+	for _, meta := range toolsMeta {
+		r.Register(&DynamicTool{
+			NameStr:    meta["name"],
+			DescStr:    meta["description"],
+			ScriptPath: filepath.Join(r.ToolsDir, meta["script"]),
+			BaseDir:    r.BaseDir,
+			Python:     r.Python, // YENİ: Python Manager enjekte edildi
+		})
+	}
+}
+
+func (r *Registry) RegisterDynamicTool(name, desc, scriptName string) {
+	r.Register(&DynamicTool{
+		NameStr:    name,
+		DescStr:    desc,
+		ScriptPath: filepath.Join(r.ToolsDir, scriptName),
+		BaseDir:    r.BaseDir,
+		Python:     r.Python, // YENİ: Python Manager enjekte edildi
+	})
+	r.saveToRegistryJSON(name, desc, scriptName)
+}
+
+func (r *Registry) saveToRegistryJSON(name, desc, script string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	regPath := filepath.Join(r.ToolsDir, "registry.json")
+	var toolsMeta []map[string]string
+	data, err := os.ReadFile(regPath)
+	if err == nil {
+		json.Unmarshal(data, &toolsMeta)
+	}
+
+	found := false
+	for i, t := range toolsMeta {
+		if t["name"] == name {
+			toolsMeta[i] = map[string]string{"name": name, "description": desc, "script": script}
+			found = true
+			break
+		}
+	}
+	if !found {
+		toolsMeta = append(toolsMeta, map[string]string{"name": name, "description": desc, "script": script})
+	}
+
+	newData, _ := json.MarshalIndent(toolsMeta, "", "  ")
+	os.WriteFile(regPath, newData, 0644)
+}
+
+// Register: Tekil bir komutu thread-safe olarak ekler.
+func (r *Registry) Register(cmd commands.Command) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.commands[cmd.Name()] = cmd
+}
+
+// Dispatch: Gelen komut ismine göre ilgili aracı çalıştırır.
+func (r *Registry) Dispatch(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	r.mu.RLock()
+	cmd, exists := r.commands[name]
+	r.mu.RUnlock()
+
+	if !exists {
+		return "", fmt.Errorf("bilinmeyen komut: '%s'", name)
+	}
+	return cmd.Execute(ctx, args)
+}
+
+func (r *Registry) GetToolboxDescription() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var sb strings.Builder
+	sb.WriteString("MEVCUT ARAÇLAR (COMMANDS):\n")
+	for name, cmd := range r.commands {
+		sb.WriteString(fmt.Sprintf("- %s: %s\n", name, cmd.Description()))
+	}
+	return sb.String()
+}
+
+func (r *Registry) GetToolDefinitions() []brain.ToolDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var tools []brain.ToolDefinition
+	var keys []string
+	for k := range r.commands {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		cmd := r.commands[k]
+		tools = append(tools, brain.ToolDefinition{
+			Name:        cmd.Name(),
+			Description: cmd.Description(),
+			Parameters:  cmd.Parameters(), // Artık her komutun kendi Parameters() metodu var
+		})
+	}
+	return tools
+}
+
+func (r *Registry) ListCommandNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var names []string
+	for name := range r.commands {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\tools\python_manager.go
+==========================================
+package tools
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+
+	"github.com/aydndglr/rick-agent/pkg/logger"
+)
+
+type PythonManager struct {
+	BaseDir string
+	VenvDir string
+	ExePath string
+}
+
+// NewPythonManager: Ortamı kontrol eder ve hazırlar
+func NewPythonManager(baseDir string) (*PythonManager, error) {
+	venvPath := filepath.Join(baseDir, "rick_venv")
+	
+	pm := &PythonManager{
+		BaseDir: baseDir,
+		VenvDir: venvPath,
+	}
+
+	// 1. İşletim sistemine göre Python yolunu belirle
+	if runtime.GOOS == "windows" {
+		pm.ExePath = filepath.Join(venvPath, "Scripts", "python.exe")
+	} else {
+		pm.ExePath = filepath.Join(venvPath, "bin", "python")
+	}
+
+	// 2. Sanal ortam var mı?
+	if _, err := os.Stat(pm.ExePath); os.IsNotExist(err) {
+		logger.Warn("🐍 Sanal Python ortamı bulunamadı, oluşturuluyor...")
+		if err := pm.createVenv(); err != nil {
+			return nil, err
+		}
+	} else {
+		logger.Success("🐍 Python Sanal Ortamı (Venv) Aktif: %s", pm.VenvDir)
+	}
+
+	return pm, nil
+}
+
+func (pm *PythonManager) createVenv() error {
+	// Global python var mı?
+	cmdCheck := exec.Command("python", "--version")
+	if err := cmdCheck.Run(); err != nil {
+		return fmt.Errorf("sistemde Python yüklü değil! Lütfen Python kur")
+	}
+
+	// Venv oluştur
+	logger.Action("⚙️ Sanal ortam kuruluyor (biraz sürebilir)...")
+	cmd := exec.Command("python", "-m", "venv", pm.VenvDir)
+	cmd.Dir = pm.BaseDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("venv oluşturma hatası: %v\n%s", err, string(out))
+	}
+
+	logger.Success("✅ Sanal ortam hazır! Gerekli kütüphaneler izole edildi.")
+	
+	// Temel pip güncellemesi (Opsiyonel)
+	// pm.Execute("-m", "pip", "install", "--upgrade", "pip")
+	
+	return nil
+}
+
+// Execute: Sanal ortamdaki Python ile komut çalıştırır
+func (pm *PythonManager) Execute(args ...string) (string, error) {
+	cmd := exec.Command(pm.ExePath, args...)
+	// cmd.Dir = pm.BaseDir // İsteğe bağlı
+	
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("python hatası: %v\nÇıktı: %s", err, string(out))
+	}
+	return string(out), nil
+}
+
+// GetInterpreterPath: Diğer araçların kullanması için exe yolunu döner
+func (pm *PythonManager) GetInterpreterPath() string {
+	return pm.ExePath
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\communication\whatsapp.go
+==========================================
+package communication
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json" // EKLENDİ: JSON ayrıştırmak için
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/aydndglr/rick-agent/internal/agent"
+	"github.com/aydndglr/rick-agent/pkg/logger"
+	"github.com/mdp/qrterminal/v3"
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types/events"
+	waProto "go.mau.fi/whatsmeow/binary/proto"
+	waTypes "go.mau.fi/whatsmeow/types"
+	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
+	_ "modernc.org/sqlite"
+)
+
+type WhatsappListener struct {
+	Client     *whatsmeow.Client
+	AdminPhone string
+	Agent      *agent.Agent
+}
+
+func NewWhatsappListener(adminPhone string, a *agent.Agent) *WhatsappListener {
+	// 1. Log Seviyesi Ayarı
+	logLevel := "INFO"
+	if a.Config != nil && !a.Config.App.Debug {
+		logLevel = "ERROR"
+	}
+	
+	dbLog := waLog.Stdout("Database", logLevel, true)
+	clientLog := waLog.Stdout("Client", logLevel, true)
+
+	// 2. Veritabanı Bağlantısı 
+	// DÜZELTME: _pragma=foreign_keys(1) eklendi. SQLite için bu zorunlu.
+	db, err := sql.Open("sqlite", "file:rick_whatsapp.db?_pragma=foreign_keys(1)&_journal_mode=WAL")
+	if err != nil {
+		panic(fmt.Sprintf("Veritabanı açılamadı: %v", err))
+	}
+
+	// Garanti olsun diye manuel de açıyoruz
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		panic(fmt.Sprintf("Foreign keys açılamadı: %v", err))
+	}
+
+	// Bağlantı havuzu ayarları
+	db.SetMaxOpenConns(1)
+
+	container := sqlstore.NewWithDB(db, "sqlite", dbLog)
+	if err := container.Upgrade(context.Background()); err != nil {
+		panic(fmt.Sprintf("Veritabanı yükseltme hatası: %v", err))
+	}
+
+	deviceStore, err := container.GetFirstDevice(context.Background())
+	if err != nil {
+		panic(err)
+	}
+
+	// 3. Client Oluştur
+	client := whatsmeow.NewClient(deviceStore, clientLog)
+
+	return &WhatsappListener{
+		Client:     client,
+		AdminPhone: strings.TrimPrefix(adminPhone, "+"),
+		Agent:      a,
+	}
+}
+
+func (w *WhatsappListener) Start(ctx context.Context) {
+	w.Client.AddEventHandler(func(evt interface{}) {
+		switch v := evt.(type) {
+		case *events.Message:
+			if v.Info.IsFromMe {
+				return
+			}
+
+			sender := v.Info.Sender.User
+			// Yetki Kontrolü
+			if w.AdminPhone != "" && !strings.Contains(sender, w.AdminPhone) {
+				return
+			}
+
+			msgText := v.Message.GetConversation()
+			if msgText == "" {
+				msgText = v.Message.GetExtendedTextMessage().GetText()
+			}
+
+			if msgText != "" {
+				logger.Info("📩 WhatsApp Mesajı: %s", msgText)
+				
+				// 🚀 ASENKRON İŞLEYİCİ
+				go w.handleMessage(ctx, v.Info.Chat, msgText)
+			}
+		}
+	})
+
+	if w.Client.Store.ID == nil {
+		qrChan, _ := w.Client.GetQRChannel(ctx)
+		if err := w.Client.Connect(); err != nil {
+			panic(err)
+		}
+		for evt := range qrChan {
+			if evt.Event == "code" {
+				fmt.Println("\n📱 Rick için QR Kodu okut patron:")
+				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+			}
+		}
+	} else {
+		if err := w.Client.Connect(); err != nil {
+			fmt.Printf("Bağlantı hatası: %v\n", err)
+		}
+	}
+}
+
+// handleMessage: Mesajı işleyip parça parça cevap gönderen fonksiyon
+// GÜNCELLEME: JSON verisini temizleyip sadece 'content' kısmını gönderir.
+func (w *WhatsappListener) handleMessage(ctx context.Context, chatJID waTypes.JID, text string) {
+	// Rick'in düşünce akışını (stream) başlat
+	streamChan := w.Agent.RunStream(ctx, text)
+
+	// Kanaldan gelen her mesajı anında WhatsApp'a ilet
+	for partialResponse := range streamChan {
+		cleanText := strings.TrimSpace(partialResponse)
+		if cleanText == "" {
+			continue
+		}
+
+		// Rick bazen JSON ("{ content: '...' }") bazen de düz metin gönderir (Tool çıktıları).
+		// Önce JSON olup olmadığını kontrol edelim.
+		var responseObj struct {
+			Content string `json:"content"`
+		}
+
+		// Eğer gelen veri geçerli bir JSON ise ve içinde 'content' alanı varsa:
+		if err := json.Unmarshal([]byte(cleanText), &responseObj); err == nil {
+			if responseObj.Content != "" {
+				w.SendMessage(chatJID, responseObj.Content)
+			}
+			// JSON geçerli ama content boşsa (örneğin sadece tool_call varsa)
+			// sessizce geçiyoruz, çünkü asıl çıktıyı tool çalışınca verecek.
+		} else {
+			// JSON değilse (Örn: "Task started ID: 123" gibi sistem mesajları veya hatalar)
+			// Mesajı olduğu gibi gönder.
+			w.SendMessage(chatJID, cleanText)
+		}
+	}
+}
+
+func (w *WhatsappListener) SendMessage(jid waTypes.JID, text string) {
+	for i := 0; i < 2; i++ {
+		_, err := w.Client.SendMessage(context.Background(), jid, &waProto.Message{
+			Conversation: proto.String(text),
+		})
+		if err == nil {
+			break
+		}
+	}
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\memory\vector_db.go
+==========================================
+package memory
+
+import (
+	"context"
+	"encoding/json"
+
+	"math"
+	"os"
+	"sort"
+	"sync"
+
+	"github.com/aydndglr/rick-agent/pkg/logger"
+	"github.com/google/uuid"
+)
+
+// Document: Bellekte tutulan bir bilgi parçası
+type Document struct {
+	ID        string                 `json:"id"`
+	Content   string                 `json:"content"`
+	Metadata  map[string]interface{} `json:"metadata"`
+	Embedding []float32              `json:"embedding"`
+}
+
+// ScoredDocument: Arama sonucu ve benzerlik puanı
+type ScoredDocument struct {
+	Document
+	Score float64
+}
+
+// VectorStore: Rick'in uzun süreli belleğinin arayüzü
+type VectorStore interface {
+	Add(ctx context.Context, doc Document) error
+	Search(ctx context.Context, queryEmbedding []float32, topK int) ([]Document, error)
+	Load() error
+}
+
+// LocalVectorDB: Disk tabanlı (JSON persistence) ve Cosine Similarity destekli vektör deposu.
+// Harici veritabanı (Qdrant/Milvus) gerektirmez, küçük/orta ölçekli projeler için mükemmeldir.
+type LocalVectorDB struct {
+	filePath string
+	docs     []Document
+	mu       sync.RWMutex // Eşzamanlı erişim koruması
+}
+
+func NewLocalVectorDB(storagePath string) *LocalVectorDB {
+	db := &LocalVectorDB{
+		filePath: storagePath,
+		docs:     []Document{},
+	}
+	// Başlangıçta varsa eski verileri yükle
+	if err := db.Load(); err != nil {
+		logger.Warn("⚠️ Bellek dosyası yüklenemedi veya boş: %v", err)
+	}
+	return db
+}
+
+func (db *LocalVectorDB) Add(ctx context.Context, doc Document) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if doc.ID == "" {
+		doc.ID = uuid.New().String()
+	}
+	
+	db.docs = append(db.docs, doc)
+	
+	// Her eklemede diske kaydet (Crash durumunda veri kaybını önler)
+	return db.saveToDisk()
+}
+
+// Search: Gerçek Kosinüs Benzerliği (Cosine Similarity) kullanarak arama yapar.
+func (db *LocalVectorDB) Search(ctx context.Context, query []float32, topK int) ([]Document, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if len(db.docs) == 0 {
+		return []Document{}, nil
+	}
+
+	logger.Info("🔍 Anlamsal bellek taranıyor (%d döküman)...", len(db.docs))
+
+	var results []ScoredDocument
+
+	// Tüm dökümanlarla karşılaştır (Brute-force vector search)
+	// Not: Binlerce döküman için bu yöntem hızlıdır, milyonlar için HNSW (Qdrant) gerekir.
+	for _, doc := range db.docs {
+		score := cosineSimilarity(query, doc.Embedding)
+		if score > 0.4 { // Eşik değer (Çok alakasızları ele)
+			results = append(results, ScoredDocument{Document: doc, Score: score})
+		}
+	}
+
+	// Puana göre sırala (En yüksek puan en üstte)
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+
+	// TopK kadarını al
+	if len(results) > topK {
+		results = results[:topK]
+	}
+
+	// Sadece Document kısmını döndür
+	finalDocs := make([]Document, len(results))
+	for i, r := range results {
+		finalDocs[i] = r.Document
+		logger.Debug("   🔹 Bulunan: %.4f puan - %s...", r.Score, r.Content[:min(30, len(r.Content))])
+	}
+
+	return finalDocs, nil
+}
+
+// Persistence: Verileri diske kaydet
+func (db *LocalVectorDB) saveToDisk() error {
+	data, err := json.MarshalIndent(db.docs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(db.filePath, data, 0644)
+}
+
+// Persistence: Verileri diskten oku
+func (db *LocalVectorDB) Load() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if _, err := os.Stat(db.filePath); os.IsNotExist(err) {
+		return nil // Dosya yoksa sorun yok, sıfırdan başlarız
+	}
+
+	data, err := os.ReadFile(db.filePath)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(data, &db.docs)
+}
+
+// --- Matematiksel Yardımcı Fonksiyonlar ---
+
+// cosineSimilarity: İki vektör arasındaki açıyı hesaplar (1.0 = Aynı, -1.0 = Zıt)
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0.0
+	}
+
+	var dotProduct, normA, normB float64
+	for i := 0; i < len(a); i++ {
+		dotProduct += float64(a[i] * b[i])
+		normA += float64(a[i] * a[i])
+		normB += float64(b[i] * b[i])
+	}
+
+	if normA == 0 || normB == 0 {
+		return 0.0
+	}
+
+	return dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\memory\rag_engine.go
+==========================================
+package memory
+
+import (
+	"context"
+	"github.com/aydndglr/rick-agent/internal/brain"
+	"github.com/aydndglr/rick-agent/pkg/logger"
+)
+
+type RAGEngine struct {
+	DB    VectorStore
+	Brain brain.LLMProvider // Embedding üretmek için kullanılacak
+}
+
+func NewRAGEngine(db VectorStore, b brain.LLMProvider) *RAGEngine {
+	return &RAGEngine{DB: db, Brain: b}
+}
+
+// RememberRelevantContext: Görevle ilgili geçmiş bilgileri getirir
+func (r *RAGEngine) RememberRelevantContext(ctx context.Context, task string) string {
+	logger.Debug("🧠 Görevle ilgili geçmiş tecrübeler hatırlanıyor...")
+	
+	// 1. Task'i vektöre çevir (Embedding)
+	// embedding, _ := r.Brain.GenerateEmbedding(ctx, task)
+	
+	// 2. Benzer dökümanları ara
+	// docs, _ := r.DB.Search(ctx, embedding, 3)
+	
+	// 3. Bilgileri birleştirip context olarak dön
+	return "Geçmiş Bilgi: Bu projenin 'Omni' modülleri (OmniPR, OmniMF) Go diliyle yazılmıştır." // Örnek context
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\apply_patch.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+
+	// YENİ IMPORT: Tools yerine Patcher kullanıyoruz
+	"github.com/aydndglr/rick-agent/internal/patcher"
+)
+
+type ApplyPatchCommand struct {
+	BaseDir string
+}
+
+func (c *ApplyPatchCommand) Name() string { return "apply_patch" }
+
+func (c *ApplyPatchCommand) Description() string {
+	return "Dosyada metin tabanlı değişiklik yapar. Belirli bir kod bloğunu bulur ve yeni blokla değiştirir."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *ApplyPatchCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Değişiklik yapılacak dosyanın yolu.",
+			},
+			"search": map[string]interface{}{
+				"type":        "string",
+				"description": "Dosya içinde aranacak olan mevcut kod bloğu (Search Block).",
+			},
+			"replace": map[string]interface{}{
+				"type":        "string",
+				"description": "Mevcut bloğun yerine koyulacak yeni kod bloğu (Replace Block).",
+			},
+		},
+		"required": []string{"path", "search", "replace"},
+	}
+}
+
+func (c *ApplyPatchCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	path, okP := args["path"].(string)
+	searchBlock, okS := args["search"].(string)
+	replaceBlock, okR := args["replace"].(string)
+
+	if !okP || !okS || !okR {
+		return "", fmt.Errorf("eksik parametre: 'path', 'search' ve 'replace' zorunludur")
+	}
+
+	fullPath := filepath.Join(c.BaseDir, path)
+
+	// YENİ KULLANIM: patcher.NewSmartPatcher [cite: 213]
+	p := patcher.NewSmartPatcher(c.BaseDir)
+	
+	err := p.Apply(fullPath, searchBlock, replaceBlock) 
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("✅ Patch başarıyla uygulandı: %s", path), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\background_ops.go
+==========================================
+package commands
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os/exec"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+)
+
+// --- GLOBAL TASK MANAGER (İşlem Merkezi) ---
+var (
+	tmInstance *TaskManager
+	once       sync.Once
+)
+
+// SafeBuffer: Eşzamanlı okuma/yazma için thread-safe buffer
+type SafeBuffer struct {
+	b  bytes.Buffer
+	mu sync.RWMutex
+}
+
+func (sb *SafeBuffer) Write(p []byte) (n int, err error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.b.Write(p)
+}
+
+func (sb *SafeBuffer) String() string {
+	sb.mu.RLock()
+	defer sb.mu.RUnlock()
+	return sb.b.String()
+}
+
+type Task struct {
+	ID         string
+	Command    string
+	PID        int    // YENİ: İşletim Sistemi Süreç Kimliği
+	Status     string // "running", "completed", "failed", "killed"
+	Output     *SafeBuffer
+	StartTime  time.Time
+	EndTime    time.Time
+	CancelFunc context.CancelFunc // İptal butonu (Tetiği çeken fonksiyon)
+	Error      error
+}
+
+type TaskManager struct {
+	Tasks map[string]*Task // TaskID -> Task
+	mu    sync.RWMutex
+}
+
+func GetTaskManager() *TaskManager {
+	once.Do(func() {
+		tmInstance = &TaskManager{
+			Tasks: make(map[string]*Task),
+		}
+	})
+	return tmInstance
+}
+
+// IsRickProcess: Verilen PID'nin Rick tarafından başlatılıp başlatılmadığını kontrol eder.
+func (tm *TaskManager) IsRickProcess(pid int) (bool, string) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	
+	for _, task := range tm.Tasks {
+		if task.Status == "running" && task.PID == pid {
+			return true, task.ID
+		}
+	}
+	return false, ""
+}
+
+// --- 1. START BACKGROUND TASK ---
+
+type StartBackgroundTaskCommand struct{}
+
+func (c *StartBackgroundTaskCommand) Name() string { return "start_task" }
+
+func (c *StartBackgroundTaskCommand) Description() string {
+	return "Arka planda uzun süreli bir işlem başlatır. PID takibi yapar."
+}
+
+func (c *StartBackgroundTaskCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"command": map[string]interface{}{
+				"type":        "string",
+				"description": "Çalıştırılacak komut (örn: 'python server.py', 'ping google.com -t').",
+			},
+		},
+		"required": []string{"command"},
+	}
+}
+
+func (c *StartBackgroundTaskCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	cmdStr, ok := args["command"].(string)
+	if !ok || cmdStr == "" {
+		return "", fmt.Errorf("eksik parametre: command")
+	}
+
+	tm := GetTaskManager()
+	taskID := fmt.Sprintf("task_%d", time.Now().UnixNano())
+
+	cmdCtx, cancel := context.WithCancel(context.Background())
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(cmdCtx, "powershell", "-Command", cmdStr)
+	} else {
+		cmd = exec.CommandContext(cmdCtx, "bash", "-c", cmdStr)
+	}
+
+	outBuf := &SafeBuffer{}
+	cmd.Stdout = outBuf
+	cmd.Stderr = outBuf
+
+	// Komutu başlat ama bekleme
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return "", fmt.Errorf("görev başlatılamadı: %v", err)
+	}
+
+	// YENİ: PID Yakalama
+	pid := 0
+	if cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+
+	task := &Task{
+		ID:         taskID,
+		Command:    cmdStr,
+		PID:        pid, // PID Kaydedildi
+		Status:     "running",
+		StartTime:  time.Now(),
+		Output:     outBuf,
+		CancelFunc: cancel,
+	}
+
+	tm.mu.Lock()
+	tm.Tasks[taskID] = task
+	tm.mu.Unlock()
+
+	go func() {
+		err := cmd.Wait()
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		task.EndTime = time.Now()
+
+		if cmdCtx.Err() == context.Canceled {
+			task.Status = "killed"
+			task.Output.Write([]byte("\n[SİSTEM]: Görev Rick tarafından durduruldu."))
+		} else if err != nil {
+			task.Status = "failed"
+			task.Error = err
+			task.Output.Write([]byte(fmt.Sprintf("\n[SİSTEM]: Hata oluştu: %v", err)))
+		} else {
+			task.Status = "completed"
+		}
+	}()
+
+	return fmt.Sprintf("🚀 Görev Başlatıldı!\n🆔 ID: %s\n🔢 PID: %d\nKomut: %s", taskID, pid, cmdStr), nil
+}
+
+// --- 2. CHECK TASK STATUS ---
+
+type CheckTaskCommand struct{}
+
+func (c *CheckTaskCommand) Name() string { return "check_task" }
+func (c *CheckTaskCommand) Description() string { return "Rick'in başlattığı görevlerin durumunu kontrol eder." }
+func (c *CheckTaskCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"task_id": map[string]interface{}{"type": "string", "description": "ID boş bırakılırsa tüm görevler listelenir."},
+		},
+	}
+}
+
+func (c *CheckTaskCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	taskID, _ := args["task_id"].(string)
+	if taskID == "" {
+		return listAllRickTasks()
+	}
+
+	tm := GetTaskManager()
+	tm.mu.RLock()
+	task, exists := tm.Tasks[taskID]
+	tm.mu.RUnlock()
+
+	if !exists {
+		return "", fmt.Errorf("görev bulunamadı: %s", taskID)
+	}
+
+	output := task.Output.String()
+	if len(output) > 1000 {
+		output = "...(önceki loglar)...\n" + output[len(output)-1000:]
+	}
+
+	statusIcon := "⏳"
+	if task.Status == "completed" { statusIcon = "✅" }
+	if task.Status == "failed" { statusIcon = "❌" }
+	if task.Status == "killed" { statusIcon = "🛑" }
+
+	return fmt.Sprintf("%s GÖREV DETAYI (%s)\nPID: %d\nDurum: %s\nLog:\n%s", statusIcon, task.ID, task.PID, strings.ToUpper(task.Status), output), nil
+}
+
+// --- 3. KILL TASK (SMART) ---
+
+type KillTaskCommand struct{}
+
+func (c *KillTaskCommand) Name() string { return "kill_task" }
+func (c *KillTaskCommand) Description() string { return "Rick'in başlattığı bir görevi ID ile durdurur." }
+func (c *KillTaskCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"task_id": map[string]interface{}{"type": "string", "description": "Durdurulacak Görev ID'si."},
+		},
+		"required": []string{"task_id"},
+	}
+}
+
+func (c *KillTaskCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	taskID, _ := args["task_id"].(string)
+	tm := GetTaskManager()
+	tm.mu.Lock()
+	task, exists := tm.Tasks[taskID]
+	if !exists {
+		tm.mu.Unlock()
+		return "", fmt.Errorf("bu ID ile aktif bir görevim yok.")
+	}
+	
+	if task.Status == "running" && task.CancelFunc != nil {
+		task.CancelFunc() // Context Cancel -> Process Kill
+		task.Status = "killed"
+		task.EndTime = time.Now()
+		tm.mu.Unlock()
+		return fmt.Sprintf("🛑 Görev (PID: %d) başarıyla sonlandırıldı.", task.PID), nil
+	}
+	tm.mu.Unlock()
+	return fmt.Sprintf("⚠️ Görev zaten aktif değil: %s", task.Status), nil
+}
+
+// --- 4. YENİ: LIST SYSTEM PROCESSES (GÖZLEM YETENEĞİ) ---
+
+type ListSystemProcessesCommand struct{}
+
+func (c *ListSystemProcessesCommand) Name() string { return "list_processes" }
+
+func (c *ListSystemProcessesCommand) Description() string {
+	return "Sistemde çalışan programları listeler. Hangi programın Rick'e, hangisinin sisteme/kullanıcıya ait olduğunu gösterir."
+}
+
+func (c *ListSystemProcessesCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"filter": map[string]interface{}{
+				"type": "string", 
+				"description": "Program adı filtresi (örn: 'chrome', 'python'). Boş bırakılırsa hepsini (ilk 50) getirir.",
+			},
+		},
+	}
+}
+
+func (c *ListSystemProcessesCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	filter, _ := args["filter"].(string)
+	filter = strings.ToLower(filter)
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// CSV formatında al: "Image Name","PID","Session Name","Session#","Mem Usage"
+		cmd = exec.Command("tasklist", "/FO", "CSV", "/NH")
+	} else {
+		// Linux/Mac: pid, command
+		cmd = exec.Command("ps", "-e", "-o", "pid,comm")
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("süreç listesi alınamadı: %v", err)
+	}
+
+	lines := strings.Split(string(output), "\n")
+	var sb strings.Builder
+	tm := GetTaskManager()
+
+	sb.WriteString(fmt.Sprintf("🖥️ SİSTEM SÜREÇLERİ (Filtre: '%s')\n", filter))
+	sb.WriteString("PID    | SAHİBİ        | PROGRAM\n")
+	sb.WriteString("-------|---------------|------------------\n")
+
+	count := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" { continue }
+
+		var pid int
+		var name string
+
+		// Basit parsing (Windows/Linux ayrımı)
+		if runtime.GOOS == "windows" {
+			parts := strings.Split(line, "\",\"")
+			if len(parts) >= 2 {
+				name = strings.Trim(parts[0], "\"")
+				fmt.Sscanf(strings.Trim(parts[1], "\""), "%d", &pid)
+			}
+		} else {
+			fmt.Sscanf(strings.TrimSpace(line), "%d %s", &pid, &name)
+		}
+
+		// Filtreleme
+		if filter != "" && !strings.Contains(strings.ToLower(name), filter) {
+			continue
+		}
+
+		// SAHİPLİK KONTROLÜ
+		owner := "SİSTEM/KULLANICI"
+		isMine, taskID := tm.IsRickProcess(pid)
+		if isMine {
+			owner = fmt.Sprintf("RICK (%s)", taskID)
+		}
+
+		// Sadece ilk 30 sonucu veya filtrelenenleri göster
+		if count < 30 || filter != "" {
+			sb.WriteString(fmt.Sprintf("%-6d | %-13s | %s\n", pid, owner, name))
+		}
+		count++
+	}
+
+	if count > 30 && filter == "" {
+		sb.WriteString("... (ve daha fazlası. Tam liste için filtre kullanın)\n")
+	}
+
+	return sb.String(), nil
+}
+
+// Helper
+func listAllRickTasks() (string, error) {
+	tm := GetTaskManager()
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	if len(tm.Tasks) == 0 {
+		return "📭 Rick'e ait aktif görev yok.", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🤖 RICK'İN GÖREVLERİ:\n")
+	for id, task := range tm.Tasks {
+		sb.WriteString(fmt.Sprintf("🆔 %s | PID: %d | Durum: %s | Komut: %s\n", id, task.PID, task.Status, task.Command))
+	}
+	return sb.String(), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\browser_ops.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/chromedp/chromedp"
+)
+
+// Tarayıcı yollarını otomatik bulan yardımcı fonksiyon
+func findBrowserPath() string {
+	var paths []string
+
+	switch runtime.GOOS {
+	case "windows":
+		paths = []string{
+			`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+			`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+			`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+			`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+			`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
+			os.Getenv("LOCALAPPDATA") + `\Google\Chrome\Application\chrome.exe`,
+		}
+	case "darwin":
+		paths = []string{
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+			"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+		}
+	default:
+		paths = []string{
+			"/usr/bin/google-chrome",
+			"/usr/bin/chromium",
+			"/usr/bin/chromium-browser",
+			"/usr/bin/microsoft-edge",
+		}
+	}
+
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+// --- 1. BROWSE PAGE (Gezinme ve Okuma) ---
+
+type BrowserReadCommand struct{}
+
+func (c *BrowserReadCommand) Name() string { return "browser_read" }
+
+func (c *BrowserReadCommand) Description() string {
+	return "Tam tarayıcı ile siteye girer, JavaScript çalıştırır ve belirtilen alanın metnini döner."
+}
+
+func (c *BrowserReadCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"url": map[string]interface{}{
+				"type":        "string",
+				"description": "Ziyaret edilecek web sitesinin tam adresi (URL).",
+			},
+			"selector": map[string]interface{}{
+				"type":        "string",
+				"description": "Metni okunacak HTML öğesi (CSS Selector). Boş bırakılırsa 'body' okunur.",
+			},
+		},
+		"required": []string{"url"},
+	}
+}
+
+func (c *BrowserReadCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	urlStr, ok := args["url"].(string)
+	selector, _ := args["selector"].(string)
+	if !ok || urlStr == "" {
+		return "", fmt.Errorf("hata: 'url' parametresi zorunludur")
+	}
+	if selector == "" {
+		selector = "body"
+	}
+
+	execPath := findBrowserPath()
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", true),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+	)
+
+	if execPath != "" {
+		opts = append(opts, chromedp.ExecPath(execPath))
+	}
+
+	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
+	defer cancel()
+
+	ctx, cancel = chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	ctx, cancel = context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
+	var res string
+	var title string
+
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(urlStr),
+		chromedp.Sleep(3*time.Second),
+		chromedp.Title(&title),
+		chromedp.Text(selector, &res, chromedp.NodeVisible),
+	)
+
+	if err != nil {
+		return "", fmt.Errorf("tarayıcı hatası: %v", err)
+	}
+
+	cleanText := strings.Join(strings.Fields(res), " ")
+	if len(cleanText) > 3000 {
+		cleanText = cleanText[:3000] + "...(kısaltıldı)"
+	}
+
+	return fmt.Sprintf("🌐 SİTE: %s\nBAŞLIK: %s\n\nİÇERİK:\n%s", urlStr, title, cleanText), nil
+}
+
+// --- 2. BROWSE INTERACT (Tıkla ve Yaz) ---
+
+type BrowserInteractCommand struct{}
+
+func (c *BrowserInteractCommand) Name() string { return "browser_action" }
+
+func (c *BrowserInteractCommand) Description() string {
+	return "Sayfada sıralı işlemler (tıklama, metin yazma, ekran görüntüsü) yapar."
+}
+
+func (c *BrowserInteractCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"url": map[string]interface{}{
+				"type":        "string",
+				"description": "İşlem yapılacak web sitesinin adresi.",
+			},
+			"actions": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type":        "string",
+					"description": "Format: 'click:selector', 'type:selector:metin' veya 'screenshot:selector'",
+				},
+				"description": "Sırasıyla yapılacak aksiyonların listesi.",
+			},
+		},
+		"required": []string{"url", "actions"},
+	}
+}
+
+func (c *BrowserInteractCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	urlStr, ok := args["url"].(string)
+	actionsRaw, okA := args["actions"].([]interface{})
+	if !ok || !okA {
+		return "", fmt.Errorf("hata: 'url' ve 'actions' listesi zorunludur")
+	}
+
+	execPath := findBrowserPath()
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", true),
+		chromedp.UserAgent("RickAgent/3.0"),
+	)
+	if execPath != "" {
+		opts = append(opts, chromedp.ExecPath(execPath))
+	}
+
+	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
+	defer cancel()
+	ctx, cancel = chromedp.NewContext(allocCtx)
+	defer cancel()
+	ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	var tasks []chromedp.Action
+	tasks = append(tasks, chromedp.Navigate(urlStr))
+	tasks = append(tasks, chromedp.Sleep(3*time.Second))
+
+	logBuilder := strings.Builder{}
+
+	for _, a := range actionsRaw {
+		actStr, ok := a.(string)
+		if !ok { continue }
+		
+		parts := strings.SplitN(actStr, ":", 3)
+		if len(parts) < 2 { continue }
+		
+		actionType := parts[0]
+		selector := parts[1]
+
+		switch actionType {
+		case "click":
+			tasks = append(tasks, chromedp.Click(selector, chromedp.NodeVisible))
+			logBuilder.WriteString(fmt.Sprintf("🖱️ Tıklandı: %s\n", selector))
+		case "type":
+			if len(parts) < 3 { continue }
+			text := parts[2]
+			tasks = append(tasks, chromedp.SendKeys(selector, text, chromedp.NodeVisible))
+			logBuilder.WriteString(fmt.Sprintf("⌨️ Yazıldı: %s -> '%s'\n", selector, text))
+		case "screenshot":
+			var buf []byte
+			tasks = append(tasks, chromedp.CaptureScreenshot(&buf))
+			logBuilder.WriteString("📸 Ekran görüntüsü alındı.\n")
+		}
+		tasks = append(tasks, chromedp.Sleep(1*time.Second))
+	}
+
+	if err := chromedp.Run(ctx, tasks...); err != nil {
+		return "", fmt.Errorf("tarayıcı etkileşim hatası: %v", err)
+	}
+
+	return fmt.Sprintf("✅ İşlemler Tamamlandı:\n%s", logBuilder.String()), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\chat_ops.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+)
+
+// ConversationalReplyCommand: Sohbet amaçlı "boş" araç.
+type ConversationalReplyCommand struct{}
+
+func (c *ConversationalReplyCommand) Name() string { return "conversational_reply" }
+
+func (c *ConversationalReplyCommand) Description() string {
+	return "Kullanıcı sohbet ediyor, hal hatır soruyor veya işlem gerektirmeyen bir şey söylüyorsa bu aracı kullan."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *ConversationalReplyCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"reply": map[string]interface{}{
+				"type":        "string",
+				"description": "Kullanıcıya verilecek sözlü cevap.",
+			},
+		},
+		"required": []string{"reply"},
+	}
+}
+
+func (c *ConversationalReplyCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	reply, ok := args["reply"].(string)
+	if !ok || reply == "" {
+		return "", fmt.Errorf("boş cevap verilemez")
+	}
+	// Teknik olarak bir işlem yapmıyoruz, sadece cevabı döndürüyoruz.
+	// Ajan (Agent) bu cevabı alıp kullanıcıya iletecek.
+	return reply, nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\create_file.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+type CreateFileCommand struct {
+	BaseDir string
+}
+
+func (c *CreateFileCommand) Name() string { return "create_file" }
+
+func (c *CreateFileCommand) Description() string {
+	return "Yeni bir dosya oluşturur ve içeriğini yazar. Tam yol (Absolute Path) veya proje içi yol verebilirsin."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *CreateFileCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Oluşturulacak dosyanın yolu (Örn: 'notlar.txt' veya 'C:\\Users\\...').",
+			},
+			"content": map[string]interface{}{
+				"type":        "string",
+				"description": "Dosyaya yazılacak metin içeriği.",
+			},
+		},
+		"required": []string{"path", "content"},
+	}
+}
+
+func (c *CreateFileCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	path, okP := args["path"].(string)
+	content, okC := args["content"].(string)
+	if !okP || !okC {
+		return "", fmt.Errorf("eksik parametre: path ve content zorunludur")
+	}
+
+	var fullPath string
+
+	// --- KRİTİK DEĞİŞİKLİK BURADA ---
+	// Eğer yol "Absolute" ise (Örn: C:\Users\...) direkt kullan.
+	// Değilse, proje klasörüne (BaseDir) ekle.
+	if filepath.IsAbs(path) {
+		fullPath = path
+	} else {
+		fullPath = filepath.Join(c.BaseDir, path)
+	}
+	// -------------------------------
+
+	// Klasör yoksa oluştur (Özyinelemeli)
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("klasör oluşturulamadı: %v", err)
+	}
+
+	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("dosya yazılamadı: %v", err)
+	}
+
+	return fmt.Sprintf("✅ Dosya başarıyla oluşturuldu: %s", fullPath), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\create_new_tool.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// Registry Interface (Circular Dependency olmaması için)
+type ToolRegistrar interface {
+	RegisterDynamicTool(name, desc, scriptName string)
+}
+
+type CreateNewToolCommand struct {
+	BaseDir  string
+	ToolsDir string
+	Registry ToolRegistrar
+}
+
+func (c *CreateNewToolCommand) Name() string { return "create_new_tool" }
+
+func (c *CreateNewToolCommand) Description() string {
+	return "Sık kullanılacak veya özel bir işlem için YENİ BİR ARAÇ oluşturur ve sisteme kaydeder."
+}
+
+// Parameters: Şemayı sıkı tutuyoruz
+func (c *CreateNewToolCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"tool_name": map[string]interface{}{
+				"type":        "string",
+				"description": "Aracın adı (Sadece harf, örn: 'resim_boyutlandir'). Uzantı yazma.",
+			},
+			"description": map[string]interface{}{
+				"type":        "string",
+				"description": "Aracın ne işe yaradığına dair kısa açıklama.",
+			},
+			"python_code": map[string]interface{}{
+				"type":        "string",
+				"description": "Python kodu. Gerekli kütüphaneleri 'ensure_lib' ile yükleyebilirsin.",
+			},
+		},
+		"required": []string{"tool_name", "description", "python_code"},
+	}
+}
+
+func (c *CreateNewToolCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	nameRaw, _ := args["tool_name"].(string)
+	desc, _ := args["description"].(string)
+	code, _ := args["python_code"].(string)
+
+	if nameRaw == "" || desc == "" || code == "" {
+		return "", fmt.Errorf("eksik parametre: tool_name, description ve python_code zorunlu")
+	}
+
+	// 🛡️ GÜVENLİK DUVARI: Model ne gönderirse göndersin temizle
+	// 1. Dosya yolunu temizle (../ gibi dizin atlamalarını engelle)
+	name := filepath.Base(nameRaw)
+	// 2. Uzantıyı kaldır (eğer model 'arac.py' yazdıysa 'arac' kalsın)
+	name = strings.TrimSuffix(name, ".py")
+	// 3. Küçük harfe çevir ve boşlukları temizle
+	name = strings.ToLower(strings.ReplaceAll(name, " ", "_"))
+
+	// 📂 HEDEF DİZİN GARANTİSİ
+	// Eğer ToolsDir boşsa (ki olmamalı ama güvenli olsun) manuel ata
+	targetDir := c.ToolsDir
+	if targetDir == "" {
+		targetDir = filepath.Join(c.BaseDir, "user_tools")
+	}
+	// Klasör yoksa oluştur
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", fmt.Errorf("araç klasörü oluşturulamadı: %v", err)
+	}
+
+	fileName := name + ".py"
+	fullPath := filepath.Join(targetDir, fileName)
+
+	// 🐍 "IRONCLAD" PYTHON ŞABLONU
+	finalCode := c.wrapPythonCode(code)
+
+	// Dosyayı Kaydet
+	if err := os.WriteFile(fullPath, []byte(finalCode), 0644); err != nil {
+		return "", fmt.Errorf("araç dosyası yazılamadı: %v", err)
+	}
+
+	// Sisteme Kaydet (Registry Update)
+	c.Registry.RegisterDynamicTool(name, desc, fileName)
+
+	return fmt.Sprintf("✨ Yeni Yetenek Kazanıldı!\nAraç: %s\nAçıklama: %s\nDosya Konumu: user_tools/%s\nDurum: Sisteme ve Hafızaya İşlendi.", name, desc, fileName), nil
+}
+
+// wrapPythonCode: Rick'in kodunu karakter sorunlarına ve eksik kütüphanelere karşı zırhlar.
+func (c *CreateNewToolCommand) wrapPythonCode(rawCode string) string {
+	wrapper := `import sys
+import json
+import os
+import io
+import subprocess
+
+# --- 1. GLOBAL WINDOWS ENCODING FIX ---
+# Windows'ta Türkçe karakterlerin patlamasını önler (cp1254 -> utf-8)
+if sys.platform == "win32":
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except:
+        pass
+
+# --- 2. OTO-PIP YÜKLEYİCİ ---
+def ensure_lib(lib_name):
+    """Kütüphane eksikse sessizce kurar."""
+    try:
+        __import__(lib_name)
+    except ImportError:
+        try:
+            # Kullanıcıya bilgi ver (stderr loglara düşer, stdout'u kirletmez)
+            sys.stderr.write(f"📦 Otomatik yükleniyor: {lib_name}...\n")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", lib_name, "--quiet"])
+            sys.stderr.write(f"✅ Yüklendi: {lib_name}\n")
+        except Exception as e:
+            sys.stderr.write(f"❌ Yükleme hatası ({lib_name}): {e}\n")
+
+# --- 3. ARGÜMAN OKUYUCU ---
+args = {}
+try:
+    if len(sys.argv) > 1:
+        raw_arg = sys.argv[1]
+        try:
+            args = json.loads(raw_arg)
+        except:
+            args = {"raw": raw_arg}
+except:
+    pass
+
+# --- RICK'IN ORİJİNAL KODU ---
+` + rawCode + `
+# --- KOD BİTİŞİ ---
+`
+	return wrapper
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\excel_ops.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"os"
+
+	"github.com/xuri/excelize/v2"
+)
+
+// --- 1. EXCEL READ ---
+type ExcelReadCommand struct{ BaseDir string }
+
+func (c *ExcelReadCommand) Name() string { return "excel_read" }
+func (c *ExcelReadCommand) Description() string { return "Excel dosyasını okur ve içeriğini metin olarak döner." }
+
+func (c *ExcelReadCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Okunacak Excel dosyasının yolu.",
+			},
+			"sheet": map[string]interface{}{
+				"type":        "string",
+				"description": "Okunacak sayfa adı (varsayılan 'Sheet1').",
+			},
+		},
+		"required": []string{"path"},
+	}
+}
+
+func (c *ExcelReadCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	path, ok := args["path"].(string)
+	if !ok { return "", fmt.Errorf("eksik parametre: path") }
+	sheet, _ := args["sheet"].(string)
+	if sheet == "" { sheet = "Sheet1" }
+
+	fullPath := filepath.Join(c.BaseDir, path)
+	f, err := excelize.OpenFile(fullPath)
+	if err != nil { return "", fmt.Errorf("excel açılamadı: %v", err) }
+	defer f.Close()
+
+	rows, err := f.GetRows(sheet)
+	if err != nil { return "", fmt.Errorf("sayfa okunamadı: %v", err) }
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📊 EXCEL VERİSİ (%s):\n", path))
+	limit := 20
+	for i, row := range rows {
+		if i >= limit {
+			sb.WriteString("... (devamı var)")
+			break
+		}
+		sb.WriteString(strings.Join(row, " | ") + "\n")
+	}
+	return sb.String(), nil
+}
+
+// --- 2. EXCEL WRITE ---
+type ExcelWriteCommand struct{ BaseDir string }
+
+func (c *ExcelWriteCommand) Name() string { return "excel_write" }
+func (c *ExcelWriteCommand) Description() string { return "Yeni bir Excel dosyası oluşturur ve verileri yazar." }
+
+func (c *ExcelWriteCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Oluşturulacak dosyanın yolu.",
+			},
+			"data": map[string]interface{}{
+				"type": "array",
+				"items": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{"type": "string"},
+				},
+				"description": "Satırlardan oluşan veri listesi (Örn: [['Ad', 'Soyad'], ['Rick', 'Sanchez']]).",
+			},
+		},
+		"required": []string{"path", "data"},
+	}
+}
+
+func (c *ExcelWriteCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	// 1. Parametre Kontrolü
+	path, ok := args["path"].(string)
+	dataRaw, okD := args["data"].([]interface{})
+	if !ok || !okD {
+		return "", fmt.Errorf("hata: 'path' ve 'data' parametreleri zorunludur")
+	}
+
+	// 2. KRİTİK YOL DÜZELTMESİ (Absolute vs Relative)
+	var fullPath string
+	if filepath.IsAbs(path) {
+		fullPath = path
+	} else {
+		fullPath = filepath.Join(c.BaseDir, path)
+	}
+
+	// 3. Hedef klasörün varlığından emin ol (Yoksa Excelize hata verir)
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("hedef dizin oluşturulamadı: %v", err)
+	}
+
+	// 4. Excel Dosyasını Oluştur
+	f := excelize.NewFile()
+	defer f.Close()
+	
+	sheet := "Sheet1"
+	// f.NewSheet(sheet) // Varsayılan olarak Sheet1 zaten oluşur
+
+	// 5. Verileri Satır Satır Yaz
+	for i, rowRaw := range dataRaw {
+		if rowItems, ok := rowRaw.([]interface{}); ok {
+			// Satırın başlangıç hücresini belirle (A1, A2, A3...)
+			cell, err := excelize.CoordinatesToCellName(1, i+1)
+			if err != nil {
+				continue
+			}
+			// Satırı komple bas
+			if err := f.SetSheetRow(sheet, cell, &rowItems); err != nil {
+				return "", fmt.Errorf("satır %d yazılamadı: %v", i+1, err)
+			}
+		}
+	}
+
+	// 6. Kaydet
+	if err := f.SaveAs(fullPath); err != nil {
+		return "", fmt.Errorf("excel dosyası kaydedilemedi: %v", err)
+	}
+
+	return fmt.Sprintf("✅ Excel başarıyla oluşturuldu:\nYol: %s", fullPath), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\fs_extended.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// --- 1. COPY PATH COMMAND ---
+
+type CopyPathCommand struct {
+	BaseDir string
+}
+
+func (c *CopyPathCommand) Name() string { return "copy_path" }
+
+func (c *CopyPathCommand) Description() string {
+	return "Dosya veya klasörü kopyalar. Klasörleri recursive (içindekilerle birlikte) kopyalar."
+}
+
+func (c *CopyPathCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"source": map[string]interface{}{
+				"type":        "string",
+				"description": "Kopyalanacak kaynak dosya veya klasörün yolu.",
+			},
+			"destination": map[string]interface{}{
+				"type":        "string",
+				"description": "Hedef yol.",
+			},
+		},
+		"required": []string{"source", "destination"},
+	}
+}
+
+func (c *CopyPathCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	src, okS := args["source"].(string)
+	dst, okD := args["destination"].(string)
+	if !okS || !okD {
+		return "", fmt.Errorf("eksik parametre: 'source' ve 'destination' zorunludur")
+	}
+
+	fullSrc := c.resolvePath(src)
+	fullDst := c.resolvePath(dst)
+
+	info, err := os.Stat(fullSrc)
+	if err != nil {
+		return "", fmt.Errorf("kaynak bulunamadı: %v", err)
+	}
+
+	if info.IsDir() {
+		if err := copyDir(fullSrc, fullDst); err != nil {
+			return "", fmt.Errorf("klasör kopyalama hatası: %v", err)
+		}
+	} else {
+		if err := copyFile(fullSrc, fullDst); err != nil {
+			return "", fmt.Errorf("dosya kopyalama hatası: %v", err)
+		}
+	}
+
+	return fmt.Sprintf("✅ Kopyalama başarılı:\nKaynak: %s\nHedef: %s", src, dst), nil
+}
+
+// --- 2. MOVE PATH COMMAND ---
+
+type MovePathCommand struct {
+	BaseDir string
+}
+
+func (c *MovePathCommand) Name() string { return "move_path" }
+
+func (c *MovePathCommand) Description() string {
+	return "Dosya veya klasörü taşır (veya ismini değiştirir)."
+}
+
+func (c *MovePathCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"source": map[string]interface{}{
+				"type":        "string",
+				"description": "Taşınacak kaynak dosya veya klasör.",
+			},
+			"destination": map[string]interface{}{
+				"type":        "string",
+				"description": "Yeni hedef yol veya yeni isim.",
+			},
+		},
+		"required": []string{"source", "destination"},
+	}
+}
+
+func (c *MovePathCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	src, okS := args["source"].(string)
+	dst, okD := args["destination"].(string)
+	if !okS || !okD {
+		return "", fmt.Errorf("eksik parametre: 'source' ve 'destination' zorunludur")
+	}
+
+	fullSrc := c.resolvePath(src)
+	fullDst := c.resolvePath(dst)
+
+	// Hedef klasör yolu yoksa oluştur
+	if err := os.MkdirAll(filepath.Dir(fullDst), 0755); err != nil {
+		return "", fmt.Errorf("hedef dizin oluşturulamadı: %v", err)
+	}
+
+	if err := os.Rename(fullSrc, fullDst); err != nil {
+		// Farklı diskler arası taşıma gerekirse kopyala+sil yapılabilir, şimdilik basit rename.
+		return "", fmt.Errorf("taşıma hatası: %v", err)
+	}
+
+	return fmt.Sprintf("✅ Taşıma/Yeniden adlandırma başarılı:\n%s -> %s", src, dst), nil
+}
+
+// --- 3. DELETE PATH COMMAND ---
+
+type DeletePathCommand struct {
+	BaseDir string
+}
+
+func (c *DeletePathCommand) Name() string { return "delete_path" }
+
+func (c *DeletePathCommand) Description() string {
+	return "Dosya veya klasörü KALICI olarak siler. DİKKAT: Geri alınamaz!"
+}
+
+func (c *DeletePathCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Silinecek dosya veya klasörün yolu.",
+			},
+		},
+		"required": []string{"path"},
+	}
+}
+
+func (c *DeletePathCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	path, ok := args["path"].(string)
+	if !ok {
+		return "", fmt.Errorf("eksik parametre: 'path' zorunludur")
+	}
+
+	fullPath := c.resolvePath(path)
+
+	// Basit bir güvenlik önlemi: Kök dizini silmeye çalışmasın
+	if fullPath == c.BaseDir || fullPath == filepath.Dir(c.BaseDir) {
+		return "", fmt.Errorf("güvenlik uyarısı: Ana proje dizinini veya üst dizini silemezsin!")
+	}
+
+	if err := os.RemoveAll(fullPath); err != nil {
+		return "", fmt.Errorf("silme hatası: %v", err)
+	}
+
+	return fmt.Sprintf("🗑️ Silme başarılı: %s", path), nil
+}
+
+// --- 4. GET FILE INFO COMMAND ---
+
+type GetFileInfoCommand struct {
+	BaseDir string
+}
+
+func (c *GetFileInfoCommand) Name() string { return "get_file_info" }
+
+func (c *GetFileInfoCommand) Description() string {
+	return "Dosya veya klasör hakkında detaylı bilgi (boyut, tarih, izinler) döner."
+}
+
+func (c *GetFileInfoCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Bilgisi istenen dosya veya klasörün yolu.",
+			},
+		},
+		"required": []string{"path"},
+	}
+}
+
+func (c *GetFileInfoCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	path, ok := args["path"].(string)
+	if !ok {
+		return "", fmt.Errorf("eksik parametre: 'path' zorunludur")
+	}
+
+	fullPath := c.resolvePath(path)
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return "", fmt.Errorf("bilgi alınamadı: %v", err)
+	}
+
+	typeStr := "Dosya"
+	if info.IsDir() {
+		typeStr = "Klasör"
+	}
+
+	return fmt.Sprintf(
+		"📄 Dosya Bilgileri:\n"+
+			"- Ad: %s\n"+
+			"- Tip: %s\n"+
+			"- Boyut: %d bytes\n"+
+			"- İzinler: %s\n"+
+			"- Son Düzenleme: %s",
+		info.Name(),
+		typeStr,
+		info.Size(),
+		info.Mode(),
+		info.ModTime().Format(time.RFC822),
+	), nil
+}
+
+// --- YARDIMCI FONKSİYONLAR ---
+
+// resolvePath: Absolute veya Relative yolları güvenli şekilde birleştirir
+func (c *CopyPathCommand) resolvePath(p string) string   { return resolve(c.BaseDir, p) }
+func (c *MovePathCommand) resolvePath(p string) string   { return resolve(c.BaseDir, p) }
+func (c *DeletePathCommand) resolvePath(p string) string { return resolve(c.BaseDir, p) }
+func (c *GetFileInfoCommand) resolvePath(p string) string { return resolve(c.BaseDir, p) }
+
+func resolve(base, p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(base, p)
+}
+
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	// Hedef klasörü oluştur
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	return err
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		destPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(destPath, info.Mode())
+		}
+		return copyFile(path, destPath)
+	})
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\git_ops.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+// Ortak Git Çalıştırıcı
+func runGit(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir // Komutu proje dizininde çalıştır
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// --- 1. GIT STATUS ---
+
+type GitStatusCommand struct {
+	BaseDir string
+}
+
+func (c *GitStatusCommand) Name() string { return "git_status" }
+
+func (c *GitStatusCommand) Description() string {
+	return "Git deposundaki güncel değişiklikleri ve dosya durumlarını listeler."
+}
+
+// Parameters: Bu komut argüman almaz.
+func (c *GitStatusCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+
+func (c *GitStatusCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	out, err := runGit(c.BaseDir, "status")
+	if err != nil {
+		return "", fmt.Errorf("git hatası: %v", err)
+	}
+	return fmt.Sprintf("🌲 Git Durumu:\n%s", out), nil
+}
+
+// --- 2. GIT COMMIT ---
+
+type GitCommitCommand struct {
+	BaseDir string
+}
+
+func (c *GitCommitCommand) Name() string { return "git_commit" }
+
+func (c *GitCommitCommand) Description() string {
+	return "Tüm değişiklikleri sahneye ekler (stage) ve bir mesajla commit eder."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *GitCommitCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"message": map[string]interface{}{
+				"type":        "string",
+				"description": "Commit mesajı (örn: 'feat: yeni araç eklendi' veya 'fix: hata düzeltildi').",
+			},
+		},
+		"required": []string{"message"},
+	}
+}
+
+func (c *GitCommitCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	msg, ok := args["message"].(string)
+	if !ok || msg == "" {
+		return "", fmt.Errorf("hata: 'message' parametresi zorunludur")
+	}
+
+	// 1. Hepsini ekle
+	if _, err := runGit(c.BaseDir, "add", "."); err != nil {
+		return "", fmt.Errorf("git add hatası: %v", err)
+	}
+
+	// 2. Commit at
+	out, err := runGit(c.BaseDir, "commit", "-m", msg)
+	if err != nil {
+		return fmt.Sprintf("⚠️ Commit yapılamadı (Belki değişiklik yoktur?):\n%s", out), nil
+	}
+
+	return fmt.Sprintf("✅ Commit Başarılı:\n%s", out), nil
+}
+
+// --- 3. GIT HISTORY ---
+
+type GitHistoryCommand struct {
+	BaseDir string
+}
+
+func (c *GitHistoryCommand) Name() string { return "git_history" }
+
+func (c *GitHistoryCommand) Description() string {
+	return "Projedeki son commit geçmişini (log) özetler."
+}
+
+// Parameters: Bu komut argüman almaz.
+func (c *GitHistoryCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+
+func (c *GitHistoryCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	// Son 5 commiti, tek satır halinde göster
+	out, err := runGit(c.BaseDir, "log", "-n", "5", "--oneline")
+	if err != nil {
+		return "", fmt.Errorf("git log hatası: %v", err)
+	}
+	return fmt.Sprintf("📜 Son Commitler:\n%s", out), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\interaction_ops.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"strings"
+)
+
+// --- PRESENT ANSWER (Final Sunum Aracı) ---
+
+type PresentAnswerCommand struct{}
+
+func (c *PresentAnswerCommand) Name() string { return "present_answer" }
+
+func (c *PresentAnswerCommand) Description() string {
+	return "Görevi tamamladığında ve kullanıcıya nihai cevabı vermek istediğinde BU ARACI KULLANMAK ZORUNDASIN."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *PresentAnswerCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"answer": map[string]interface{}{
+				"type":        "string",
+				"description": "Kullanıcıya gösterilecek detaylı ve nihai yanıt.",
+			},
+		},
+		"required": []string{"answer"},
+	}
+}
+
+func (c *PresentAnswerCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	// GÜNCELLEME: Şema "answer" zorunlu kılıyor ama yine de esnek olalım (Fallback Logic).
+	
+	// 1. Öncelikli olarak 'answer' ara
+	if val, ok := args["answer"].(string); ok && val != "" {
+		return val, nil
+	}
+
+	// 2. Yoksa alternatiflere bak (message, content, text, result)
+	alternatives := []string{"message", "content", "text", "result", "output"}
+	for _, key := range alternatives {
+		if val, ok := args[key].(string); ok && val != "" {
+			return val, nil // Hata vermek yerine kabul et
+		}
+	}
+	
+	// 3. Eğer liste gönderdiyse (bazen yapıyor)
+	if resList, ok := args["results"].([]interface{}); ok {
+		var sb strings.Builder
+		for _, item := range resList {
+			sb.WriteString(fmt.Sprintf("- %v\n", item))
+		}
+		return sb.String(), nil
+	}
+
+	// Hiçbiri yoksa
+	return "", fmt.Errorf("HATA: Cevap metnini bulamadım. Lütfen 'answer' parametresini kullan.")
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\interface.go
+==========================================
+package commands
+
+import (
+	"context"
+)
+
+// Command: Her Rick komutunun uygulaması gereken interface
+type Command interface {
+	Name() string                                      // Komutun benzersiz adı (örn: create_file)
+	Description() string                               // Modelin ne zaman kullanacağını anlaması için açıklama
+	
+	// Parameters: Aracın kabul ettiği JSON şeması (OpenAI/Ollama standardı).
+	// Bu fonksiyon, modelin hangi parametreleri (string, int, required vb.) göndermesi gerektiğini söyler.
+	Parameters() map[string]interface{} 
+	
+	Execute(ctx context.Context, args map[string]interface{}) (string, error) // Gerçek Go kodu
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\list_project.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"path/filepath"
+	"strings"
+)
+
+type ListProjectCommand struct {
+	BaseDir string
+}
+
+func (c *ListProjectCommand) Name() string { return "list_project" }
+
+func (c *ListProjectCommand) Description() string {
+	return "Proje dizin yapısını ve dosyaları ağaç şeklinde listeler."
+}
+
+// Parameters: Bu komut argüman almaz, o yüzden boş şema dönüyoruz.
+func (c *ListProjectCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+
+func (c *ListProjectCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	var tree strings.Builder
+	tree.WriteString(fmt.Sprintf("📂 Proje Kök Dizini: %s\n", c.BaseDir))
+
+	// Dosya sistemini tara
+	err := filepath.WalkDir(c.BaseDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Gizli dosyaları ve büyük klasörleri atla (Rick zaman kaybetmez!)
+		if c.shouldIgnore(d.Name()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Yolu temizle (BaseDir kısmını çıkar)
+		relPath, _ := filepath.Rel(c.BaseDir, path)
+		if relPath == "." {
+			return nil
+		}
+
+		// Derinliğe göre boşluk (indent) ekle
+		depth := strings.Count(relPath, string(filepath.Separator))
+		indent := strings.Repeat("  ", depth)
+
+		icon := "📄"
+		if d.IsDir() {
+			icon = "📁"
+		}
+
+		tree.WriteString(fmt.Sprintf("%s%s %s\n", indent, icon, d.Name()))
+		return nil
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("proje taranırken hata oluştu: %v", err)
+	}
+
+	return tree.String(), nil
+}
+
+// shouldIgnore: Rick'in kafasını karıştıracak gereksiz klasörleri filtreler
+func (c *ListProjectCommand) shouldIgnore(name string) bool {
+	ignoreList := []string{
+		".git",
+		".vscode",
+		"node_modules",
+		"vendor",
+		"bin",
+		"rick_whatsapp.db", // Kendi DB'sini okumasın
+		"__pycache__",      // Python cache
+	}
+
+	for _, ignore := range ignoreList {
+		if name == ignore {
+			return true
+		}
+	}
+
+	// Gizli dosyalar (nokta ile başlayanlar)
+	return strings.HasPrefix(name, ".") && name != "."
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\lsp_ops.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+type CodeAnalyzeCommand struct {
+	BaseDir string
+}
+
+func (c *CodeAnalyzeCommand) Name() string { return "code_analyze" }
+
+func (c *CodeAnalyzeCommand) Description() string {
+	return "Kodu derlemeden statik analiz (LSP/Lint) yapar; yazım hatalarını ve potansiyel bugları raporlar."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *CodeAnalyzeCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Statik analiz yapılacak dosya veya klasörün yolu (Örn: 'cmd/main.go' veya 'internal/').",
+			},
+		},
+		"required": []string{"path"},
+	}
+}
+
+func (c *CodeAnalyzeCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	path, ok := args["path"].(string)
+	if !ok || path == "" {
+		return "", fmt.Errorf("hata: 'path' parametresi eksik veya geçersiz")
+	}
+
+	fullPath := filepath.Join(c.BaseDir, path)
+	ext := filepath.Ext(fullPath)
+
+	var cmd *exec.Cmd
+	var toolName string
+
+	switch ext {
+	case ".go":
+		toolName = "go vet"
+		dir := filepath.Dir(fullPath)
+		if strings.HasSuffix(fullPath, "/...") {
+			dir = fullPath 
+		}
+		cmd = exec.Command("go", "vet", dir)
+
+	case ".py":
+		toolName = "python syntax check"
+		cmd = exec.Command("python", "-m", "py_compile", fullPath)
+
+	case ".js", ".ts":
+		toolName = "node check"
+		cmd = exec.Command("node", "--check", fullPath)
+
+	default:
+		return "", fmt.Errorf("bu dosya türü için analizci tanımlı değil: %s", ext)
+	}
+
+	output, err := cmd.CombinedOutput()
+	outStr := string(output)
+
+	if err != nil {
+		return fmt.Sprintf("❌ %s HATA BULDU:\n%s\n(Lütfen bu hataları düzelt)", toolName, outStr), nil
+	}
+
+	if outStr == "" {
+		return fmt.Sprintf("✅ %s Analizi: Kod temiz görünüyor.", toolName), nil
+	}
+
+	return fmt.Sprintf("⚠️ %s Uyarıları:\n%s", toolName, outStr), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\office_base.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// ensurePythonLibs: Gerekli Python kütüphanelerini kontrol eder, yoksa yükler.
+func ensurePythonLibs(ctx context.Context, libs ...string) error {
+	cmd := exec.CommandContext(ctx, "pip", "list")
+	output, err := cmd.CombinedOutput()
+	installedPackages := string(output)
+
+	if err != nil {
+		return fmt.Errorf("pip komutu çalıştırılamadı, Python yüklü mü? Hata: %v", err)
+	}
+
+	for _, lib := range libs {
+		if !strings.Contains(strings.ToLower(installedPackages), strings.ToLower(lib)) {
+			fmt.Printf("📦 Rick: '%s' eksik, otomatik yükleniyor...\n", lib)
+			installCmd := exec.CommandContext(ctx, "pip", "install", lib)
+			if out, err := installCmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("%s yüklenirken hata oluştu: %s", lib, string(out))
+			}
+			fmt.Printf("✅ Rick: '%s' başarıyla yüklendi.\n", lib)
+		}
+	}
+	return nil
+}
+
+// runEmbeddedPython: Go içinden geçici Python scripti çalıştırır.
+func runEmbeddedPython(ctx context.Context, scriptContent string, baseDir string) (string, error) {
+	tmpPath := filepath.Join(baseDir, fmt.Sprintf("rick_script_%d.py", os.Getpid()))
+	if err := os.WriteFile(tmpPath, []byte(scriptContent), 0644); err != nil {
+		return "", err
+	}
+	defer os.Remove(tmpPath)
+
+	cmd := exec.CommandContext(ctx, "python", tmpPath)
+	cmd.Dir = baseDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("script hatası: %v\nÇıktı: %s", err, string(output))
+	}
+	return string(output), nil
+}
+
+func stripXML(input string) string {
+	var sb strings.Builder
+	inTag := false
+	for _, r := range input {
+		if r == '<' { inTag = true; continue }
+		if r == '>' { inTag = false; sb.WriteString(" "); continue }
+		if !inTag { sb.WriteRune(r) }
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\outlook_ops.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+)
+
+// --- 1. OUTLOOK READ ---
+type OutlookReadCommand struct{ BaseDir string }
+
+func (c *OutlookReadCommand) Name() string { return "outlook_read" }
+func (c *OutlookReadCommand) Description() string { return "Outlook gelen kutusundaki son mailleri okur." }
+
+func (c *OutlookReadCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"count": map[string]interface{}{
+				"type":        "integer",
+				"description": "Okunacak son mail sayısı (varsayılan 5).",
+			},
+		},
+	}
+}
+
+func (c *OutlookReadCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	if err := ensurePythonLibs(ctx, "pywin32"); err != nil { return "", err }
+	count := 5
+	if val, ok := args["count"].(float64); ok { count = int(val) }
+
+	script := fmt.Sprintf(`
+import win32com.client
+import sys
+import io
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+try:
+    limit = %d
+    outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+    inbox = outlook.GetDefaultFolder(6)
+    messages = inbox.Items
+    messages.Sort("[ReceivedTime]", True)
+    print(f"📧 SON {limit} MAIL:\n")
+    i = 0
+    for message in messages:
+        if i >= limit: break
+        try:
+            sender = str(message.SenderName)
+            subject = str(message.Subject)
+            body = str(message.Body)[:100].replace('\n', ' ') + "..."
+            print(f"🔹 KIMDEN: {sender}\n   KONU: {subject}\n   ÖZET: {body}\n")
+            i += 1
+        except: continue
+except Exception as e:
+    print(f"HATA: {e}")
+`, count)
+	return runEmbeddedPython(ctx, script, c.BaseDir)
+}
+
+// --- 2. OUTLOOK SEND ---
+type OutlookSendCommand struct{ BaseDir string }
+
+func (c *OutlookSendCommand) Name() string { return "outlook_send" }
+func (c *OutlookSendCommand) Description() string { return "Outlook üzerinden yeni e-posta gönderir." }
+
+func (c *OutlookSendCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"to":      map[string]interface{}{"type": "string", "description": "Alıcı e-posta adresi."},
+			"subject": map[string]interface{}{"type": "string", "description": "E-posta konusu."},
+			"body":    map[string]interface{}{"type": "string", "description": "E-posta içeriği."},
+		},
+		"required": []string{"to", "subject", "body"},
+	}
+}
+
+func (c *OutlookSendCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	if err := ensurePythonLibs(ctx, "pywin32"); err != nil { return "", err }
+	to, _ := args["to"].(string)
+	subj, _ := args["subject"].(string)
+	body, _ := args["body"].(string)
+
+	script := fmt.Sprintf(`
+import win32com.client
+try:
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    mail = outlook.CreateItem(0)
+    mail.To = r"%s"
+    mail.Subject = r"%s"
+    mail.Body = r"""%s"""
+    mail.Send()
+    print("✅ Mail başarıyla gönderildi.")
+except Exception as e:
+    print(f"HATA: {e}")
+`, to, subj, body)
+	return runEmbeddedPython(ctx, script, c.BaseDir)
+}
+
+// --- 3. OUTLOOK ORGANIZE ---
+type OutlookOrganizeCommand struct{ BaseDir string }
+
+func (c *OutlookOrganizeCommand) Name() string { return "outlook_organize" }
+func (c *OutlookOrganizeCommand) Description() string { return "Mailleri filtreleyerek siler veya klasöre taşır." }
+
+func (c *OutlookOrganizeCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"action":           map[string]interface{}{"type": "string", "enum": []string{"delete", "move"}, "description": "Yapılacak işlem."},
+			"subject_contains": map[string]interface{}{"type": "string", "description": "Aranacak kelime."},
+			"target_folder":    map[string]interface{}{"type": "string", "description": "Taşıma yapılacaksa hedef klasör adı."},
+		},
+		"required": []string{"action", "subject_contains"},
+	}
+}
+
+func (c *OutlookOrganizeCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	if err := ensurePythonLibs(ctx, "pywin32"); err != nil { return "", err }
+	action, _ := args["action"].(string)
+	filter, _ := args["subject_contains"].(string)
+	folderName, _ := args["target_folder"].(string)
+
+	script := fmt.Sprintf(`
+import win32com.client
+try:
+    outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+    inbox = outlook.GetDefaultFolder(6)
+    messages = inbox.Items
+    messages.Sort("[ReceivedTime]", True)
+    action, filter_text, target_folder_name = "%s", "%s".lower(), "%s"
+    count = 0
+    msg_list = [messages[i] for i in range(1, min(len(messages), 50) + 1)]
+    for message in msg_list:
+        try:
+            if filter_text in str(message.Subject).lower() or filter_text in str(message.Body).lower():
+                if action == "delete":
+                    message.Delete()
+                    print(f"🗑️ SİLİNDİ: {message.Subject}")
+                elif action == "move":
+                    try: dest = inbox.Folders(target_folder_name)
+                    except: dest = inbox.Folders.Add(target_folder_name)
+                    message.Move(dest)
+                    print(f"📂 TAŞINDI: {message.Subject} -> {target_folder_name}")
+                count += 1
+        except: continue
+    print(f"✅ İşlem tamamlandı. {count} mail etkilendi." if count > 0 else "⚠️ Mail bulunamadı.")
+except Exception as e: print(f"HATA: {e}")
+`, action, filter, folderName)
+	return runEmbeddedPython(ctx, script, c.BaseDir)
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\read_file.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+type ReadFileCommand struct {
+	BaseDir string
+}
+
+func (c *ReadFileCommand) Name() string { return "read_file" }
+
+func (c *ReadFileCommand) Description() string {
+	return "Belirtilen dosyanın içeriğini okur."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *ReadFileCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Okunacak dosyanın yolu (Örn: 'main.go' veya 'internal/config.go').",
+			},
+		},
+		"required": []string{"path"},
+	}
+}
+
+func (c *ReadFileCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	// 1. Parametre Kontrolü
+	path, ok := args["path"].(string)
+	if !ok || path == "" {
+		return "", fmt.Errorf("hata: 'path' parametresi eksik veya geçersiz")
+	}
+
+	// 2. Güvenli Yol Oluşturma
+	// Rick'in sadece çalışma dizininde kalmasını sağlıyoruz
+	fullPath := filepath.Join(c.BaseDir, path)
+
+	// 3. Dosyayı Oku
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("dosya bulunamadı: %s", path)
+		}
+		return "", fmt.Errorf("dosya okunamadı: %v", err)
+	}
+
+	// 4. Sonucu Dön
+	return fmt.Sprintf("📄 Dosya: %s\n\n%s", path, string(content)), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\run_command.go
+==========================================
+package commands
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os/exec"
+	"runtime"
+	"strings"
+)
+
+type RunCommand struct{}
+
+func (c *RunCommand) Name() string { return "run_command" }
+
+func (c *RunCommand) Description() string {
+	return "Terminalde sistem komutu çalıştırır. Windows için PowerShell, Linux/Mac için Bash kullanılır."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *RunCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"command": map[string]interface{}{
+				"type":        "string",
+				"description": "Çalıştırılacak terminal komutu (örn: 'dir', 'ls -la', 'ipconfig').",
+			},
+		},
+		"required": []string{"command"},
+	}
+}
+
+func (c *RunCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	// 1. Komutu Al
+	cmdStr, ok := args["command"].(string)
+	if !ok || cmdStr == "" {
+		return "", fmt.Errorf("eksik parametre: 'command' zorunludur")
+	}
+
+	// 2. İşletim Sistemine Göre Hazırla
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// Windows'ta PowerShell kullanımı
+		cmd = exec.CommandContext(ctx, "powershell", "-Command", cmdStr)
+	} else {
+		// Linux/Mac'te Bash kullanımı
+		cmd = exec.CommandContext(ctx, "bash", "-c", cmdStr)
+	}
+
+	// 3. Çıktıları Yakala
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// 4. Çalıştır
+	err := cmd.Run()
+
+	output := strings.TrimSpace(stdout.String())
+	errOutput := strings.TrimSpace(stderr.String())
+
+	// 5. Sonucu Raporla
+	if err != nil {
+		return "", fmt.Errorf("komut hatası (Exit Code: %v):\n%s", err, errOutput)
+	}
+
+	if output == "" && errOutput == "" {
+		return "✅ Komut başarıyla çalıştı ancak bir çıktı üretmedi.", nil
+	}
+
+	if errOutput != "" {
+		return fmt.Sprintf("⚠️ Komut çalıştı ama stderr mesajı var:\n%s\n\nÇıktı:\n%s", errOutput, output), nil
+	}
+
+	return fmt.Sprintf("💻 Terminal Çıktısı:\n%s", output), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\scheduler_ops.go
+==========================================
+package commands
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/aydndglr/rick-agent/pkg/logger"
+)
+
+// --- ALARM VERİ YAPISI ---
+type Reminder struct {
+	ID        string    `json:"id"`
+	Time      time.Time `json:"time"`
+	Message   string    `json:"message"`
+	Completed bool      `json:"completed"`
+}
+
+var (
+	reminderFile = "reminders.json"
+	reminders    []Reminder
+	mu           sync.Mutex
+	schedulerOn  bool
+)
+
+// --- ALARM MOTORU (Arka Plan) ---
+
+// StartScheduler: Main fonksiyonunda veya bir komut tetiklendiğinde başlatılır.
+func StartScheduler() {
+	if schedulerOn {
+		return
+	}
+	schedulerOn = true
+
+	loadReminders()
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second) // Her 30 saniyede bir kontrol et
+		for range ticker.C {
+			checkReminders()
+		}
+	}()
+}
+
+func checkReminders() {
+	mu.Lock()
+	defer mu.Unlock()
+
+	now := time.Now()
+	dirty := false
+
+	for i, r := range reminders {
+		if !r.Completed && now.After(r.Time) {
+			// 🔔 ALARM ÇALDI!
+			logger.Success("\n\n⏰ [ALARM] RICK HATIRLATIYOR: %s\n", r.Message)
+			
+			// Gelecekte buraya WhatsApp veya sistem bildirimi eklenebilir.
+			reminders[i].Completed = true
+			dirty = true
+		}
+	}
+
+	if dirty {
+		saveReminders()
+	}
+}
+
+func loadReminders() {
+	data, err := os.ReadFile(reminderFile)
+	if err == nil {
+		json.Unmarshal(data, &reminders)
+	}
+}
+
+func saveReminders() {
+	data, _ := json.MarshalIndent(reminders, "", "  ")
+	os.WriteFile(reminderFile, data, 0644)
+}
+
+// --- TOOL: SET REMINDER ---
+
+type SetReminderCommand struct{}
+
+func (c *SetReminderCommand) Name() string { return "set_reminder" }
+
+func (c *SetReminderCommand) Description() string {
+	return "Belirli bir tarih ve saat için hatırlatıcı veya alarm kurar."
+}
+
+// Parameters: Rick'e bu aracın şemasını bildirir.
+func (c *SetReminderCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"time": map[string]interface{}{
+				"type":        "string",
+				"description": "Hatırlatıcı zamanı (Format: YYYY-MM-DD HH:MM).",
+			},
+			"message": map[string]interface{}{
+				"type":        "string",
+				"description": "Zamanı geldiğinde hatırlatılacak mesaj.",
+			},
+		},
+		"required": []string{"time", "message"},
+	}
+}
+
+func (c *SetReminderCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	timeStr, _ := args["time"].(string)
+	msg, _ := args["message"].(string)
+
+	if timeStr == "" || msg == "" {
+		return "", fmt.Errorf("hata: 'time' ve 'message' parametreleri zorunludur")
+	}
+
+	// Zamanı Parse Et
+	layout := "2006-01-02 15:04"
+	targetTime, err := time.Parse(layout, timeStr)
+	if err != nil {
+		// Alternatif format (saniyeli) denemesi
+		targetTime, err = time.Parse("2006-01-02 15:04:05", timeStr)
+		if err != nil {
+			return "", fmt.Errorf("zaman formatı hatası (Beklenen: YYYY-MM-DD HH:MM): %v", err)
+		}
+	}
+
+	if targetTime.Before(time.Now()) {
+		return "", fmt.Errorf("geçmiş bir zamana alarm kurulamaz. (Şu anki zaman: %s)", time.Now().Format(layout))
+	}
+
+	mu.Lock()
+	reminders = append(reminders, Reminder{
+		ID:        fmt.Sprintf("rem_%d", time.Now().Unix()),
+		Time:      targetTime,
+		Message:   msg,
+		Completed: false,
+	})
+	saveReminders()
+	mu.Unlock()
+
+	// Scheduler'ın çalıştığından emin ol
+	StartScheduler()
+
+	return fmt.Sprintf("⏰ Hatırlatıcı Kuruldu!\n📅 Zaman: %s\n💬 Mesaj: %s", targetTime.Format(layout), msg), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\ssh_ops.go
+==========================================
+package commands
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+)
+
+// --- 1. SSH RUN COMMAND ---
+
+type SSHRunCommand struct{}
+
+func (c *SSHRunCommand) Name() string { return "ssh_run" }
+
+func (c *SSHRunCommand) Description() string {
+	return "Uzak bir sunucuya SSH ile bağlanır ve bir komut çalıştırır."
+}
+
+func (c *SSHRunCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"host": map[string]interface{}{
+				"type":        "string",
+				"description": "Sunucu adresi ve portu (Örn: '192.168.1.10:22').",
+			},
+			"user": map[string]interface{}{
+				"type":        "string",
+				"description": "SSH kullanıcı adı.",
+			},
+			"password": map[string]interface{}{
+				"type":        "string",
+				"description": "SSH şifresi (Anahtar kullanılmıyorsa zorunludur).",
+			},
+			"key_path": map[string]interface{}{
+				"type":        "string",
+				"description": "Özel anahtar (Private Key) dosyasının yolu (Opsiyonel).",
+			},
+			"command": map[string]interface{}{
+				"type":        "string",
+				"description": "Uzak sunucuda çalıştırılacak komut.",
+			},
+		},
+		"required": []string{"host", "user", "command"},
+	}
+}
+
+func (c *SSHRunCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	host, _ := args["host"].(string)
+	user, _ := args["user"].(string)
+	pass, _ := args["password"].(string)
+	keyPath, _ := args["key_path"].(string)
+	cmd, _ := args["command"].(string)
+
+	if host == "" || user == "" || cmd == "" {
+		return "", fmt.Errorf("eksik parametre: host, user ve command zorunludur")
+	}
+
+	config := &ssh.ClientConfig{
+		User:            user,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         10 * time.Second,
+	}
+
+	if keyPath != "" {
+		key, err := os.ReadFile(keyPath)
+		if err != nil {
+			return "", fmt.Errorf("key dosyası okunamadı: %v", err)
+		}
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			return "", fmt.Errorf("key parse hatası: %v", err)
+		}
+		config.Auth = []ssh.AuthMethod{ssh.PublicKeys(signer)}
+	} else {
+		config.Auth = []ssh.AuthMethod{ssh.Password(pass)}
+	}
+
+	client, err := ssh.Dial("tcp", host, config)
+	if err != nil {
+		return "", fmt.Errorf("bağlantı hatası: %v", err)
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("oturum açma hatası: %v", err)
+	}
+	defer session.Close()
+
+	var stdout, stderr bytes.Buffer
+	session.Stdout = &stdout
+	session.Stderr = &stderr
+
+	if err := session.Run(cmd); err != nil {
+		return fmt.Sprintf("⚠️ Komut hata verdi:\n%s\nHata: %v", stderr.String(), err), nil
+	}
+
+	return fmt.Sprintf("✅ Sunucu Yanıtı (%s):\n%s", host, stdout.String()), nil
+}
+
+// --- 2. SSH UPLOAD COMMAND ---
+
+type SSHUploadCommand struct {
+	BaseDir string
+}
+
+func (c *SSHUploadCommand) Name() string { return "ssh_upload" }
+
+func (c *SSHUploadCommand) Description() string {
+	return "Yerel bir dosyayı uzak sunucuya SCP protokolü ile yükler."
+}
+
+func (c *SSHUploadCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"host": map[string]interface{}{
+				"type":        "string",
+				"description": "Hedef sunucu adresi (IP:Port).",
+			},
+			"user": map[string]interface{}{
+				"type":        "string",
+				"description": "SSH kullanıcı adı.",
+			},
+			"password": map[string]interface{}{
+				"type":        "string",
+				"description": "SSH şifresi.",
+			},
+			"local_path": map[string]interface{}{
+				"type":        "string",
+				"description": "Yüklenecek yerel dosyanın yolu.",
+			},
+			"remote_path": map[string]interface{}{
+				"type":        "string",
+				"description": "Sunucudaki hedef yol (örn: '/home/user/file.txt').",
+			},
+		},
+		"required": []string{"host", "user", "local_path", "remote_path"},
+	}
+}
+
+func (c *SSHUploadCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	host, _ := args["host"].(string)
+	user, _ := args["user"].(string)
+	pass, _ := args["password"].(string)
+	localPath, _ := args["local_path"].(string)
+	remotePath, _ := args["remote_path"].(string)
+
+	fullLocalPath := filepath.Join(c.BaseDir, localPath)
+	if filepath.IsAbs(localPath) {
+		fullLocalPath = localPath
+	}
+
+	file, err := os.Open(fullLocalPath)
+	if err != nil {
+		return "", fmt.Errorf("yerel dosya okunamadı: %v", err)
+	}
+	defer file.Close()
+
+	stat, _ := file.Stat()
+
+	config := &ssh.ClientConfig{
+		User:            user,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Auth:            []ssh.AuthMethod{ssh.Password(pass)},
+		Timeout:         10 * time.Second,
+	}
+
+	client, err := ssh.Dial("tcp", host, config)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+
+	go func() {
+		w, _ := session.StdinPipe()
+		defer w.Close()
+		fmt.Fprintln(w, "C0644", stat.Size(), filepath.Base(remotePath))
+		io.Copy(w, file)
+		fmt.Fprint(w, "\x00")
+	}()
+
+	if err := session.Run("/usr/bin/scp -t " + remotePath); err != nil {
+		return "", fmt.Errorf("yükleme başarısız: %v", err)
+	}
+
+	return fmt.Sprintf("✅ Dosya başarıyla yüklendi: %s -> %s:%s", localPath, host, remotePath), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\sys_control.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"runtime"
+	"strings"
+)
+
+// --- 1. OPEN APP COMMAND ---
+
+type OpenAppCommand struct{}
+
+func (c *OpenAppCommand) Name() string { return "open_app" }
+
+func (c *OpenAppCommand) Description() string {
+	return "Bilgisayardaki bir uygulamayı başlatır."
+}
+
+func (c *OpenAppCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"app_name": map[string]interface{}{
+				"type":        "string",
+				"description": "Başlatılacak uygulamanın adı (örn: 'notepad', 'calc', 'chrome').",
+			},
+		},
+		"required": []string{"app_name"},
+	}
+}
+
+func (c *OpenAppCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	appName, ok := args["app_name"].(string)
+	if !ok || appName == "" {
+		return "", fmt.Errorf("eksik parametre: app_name")
+	}
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// Windows'ta 'start' komutu ile açmak daha güvenilirdir
+		cmd = exec.Command("cmd", "/C", "start", appName)
+	} else if runtime.GOOS == "darwin" { // Mac
+		cmd = exec.Command("open", "-a", appName)
+	} else { // Linux
+		cmd = exec.Command("xdg-open", appName)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("uygulama açılamadı: %v", err)
+	}
+
+	return fmt.Sprintf("✅ Uygulama başlatıldı: %s", appName), nil
+}
+
+// --- 2. KILL PROCESS COMMAND ---
+
+type KillProcessCommand struct{}
+
+func (c *KillProcessCommand) Name() string { return "kill_process" }
+
+func (c *KillProcessCommand) Description() string {
+	return "Çalışan bir uygulamayı isminden sonlandırır."
+}
+
+func (c *KillProcessCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"process_name": map[string]interface{}{
+				"type":        "string",
+				"description": "Sonlandırılacak işlemin adı (örn: 'chrome.exe').",
+			},
+		},
+		"required": []string{"process_name"},
+	}
+}
+
+func (c *KillProcessCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	procName, ok := args["process_name"].(string)
+	if !ok || procName == "" {
+		return "", fmt.Errorf("eksik parametre: process_name")
+	}
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// /F: Force, /IM: Image Name
+		cmd = exec.Command("taskkill", "/F", "/IM", procName)
+	} else {
+		cmd = exec.Command("pkill", "-f", procName)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("⚠️ İşlem sonlandırılamadı (Belki zaten kapalıdır?):\n%s", string(output)), nil
+	}
+
+	return fmt.Sprintf("🛑 İşlem sonlandırıldı: %s", procName), nil
+}
+
+// --- 3. VIRUS SCAN COMMAND (Windows Defender) ---
+
+type VirusScanCommand struct {
+	BaseDir string
+}
+
+func (c *VirusScanCommand) Name() string { return "virus_scan" }
+
+func (c *VirusScanCommand) Description() string {
+	return "Belirtilen dosya veya klasörü Windows Defender ile tarar."
+}
+
+func (c *VirusScanCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Taranacak dosya veya klasörün tam yolu.",
+			},
+		},
+		"required": []string{"path"},
+	}
+}
+
+func (c *VirusScanCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	if runtime.GOOS != "windows" {
+		return "⚠️ Bu özellik sadece Windows'ta çalışır.", nil
+	}
+
+	path, ok := args["path"].(string)
+	if !ok {
+		return "", fmt.Errorf("eksik parametre: path")
+	}
+
+	// Defender CLI aracı genelde bu yoldadır
+	defenderPath := "C:\\Program Files\\Windows Defender\\MpCmdRun.exe"
+	
+	// -Scan -ScanType 3 -File <path> (3 = Custom Scan)
+	cmd := exec.Command(defenderPath, "-Scan", "-ScanType", "3", "-File", path)
+	
+	output, err := cmd.CombinedOutput()
+	result := string(output)
+
+	if err != nil {
+		// Defender tehdit bulduğunda bazen exit code 2 döner
+		if strings.Contains(result, "threat") || strings.Contains(result, "found") {
+			return fmt.Sprintf("🚨 TEHDİT ALGILANDI!\n%s", result), nil
+		}
+		return fmt.Sprintf("⚠️ Tarama hatası veya temiz:\n%s", result), nil
+	}
+
+	return fmt.Sprintf("🛡️ Tarama Tamamlandı. Temiz görünüyor.\nRapor:\n%s", result), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\web_search.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/PuerkitoBio/goquery" // HTML parse etmek için (go get github.com/PuerkitoBio/goquery)
+)
+
+// --- 1. WEB SEARCH COMMAND ---
+
+type WebSearchCommand struct{}
+
+func (c *WebSearchCommand) Name() string { return "web_search" }
+
+func (c *WebSearchCommand) Description() string {
+	return "İnternette arama yapar ve ilk 5 sonucu özet olarak döner."
+}
+
+func (c *WebSearchCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"query": map[string]interface{}{
+				"type":        "string",
+				"description": "Aranacak kelime veya cümle.",
+			},
+		},
+		"required": []string{"query"},
+	}
+}
+
+func (c *WebSearchCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	query, ok := args["query"].(string)
+	if !ok || query == "" {
+		return "", fmt.Errorf("eksik parametre: 'query' zorunludur")
+	}
+
+	// DuckDuckGo HTML sürümü üzerinden arama yapıyoruz (API Key gerektirmez)
+	searchURL := fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(query))
+	
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, _ := http.NewRequestWithContext(ctx, "GET", searchURL, nil)
+	// User-Agent eklemezsek bot olduğumuzu anlar ve engeller
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("arama hatası: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("arama motoru hata verdi (Status: %d)", resp.StatusCode)
+	}
+
+	// HTML Parse Etme (goquery kullanarak)
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("html parse hatası: %v", err)
+	}
+
+	var results []string
+	count := 0
+
+	// DuckDuckGo sonuçlarını ayıkla (.result__body sınıfı)
+	doc.Find(".result__body").Each(func(i int, s *goquery.Selection) {
+		if count >= 5 {
+			return
+		}
+		title := strings.TrimSpace(s.Find(".result__title").Text())
+		link := s.Find(".result__a").AttrOr("href", "")
+		snippet := strings.TrimSpace(s.Find(".result__snippet").Text())
+
+		if title != "" && link != "" {
+			results = append(results, fmt.Sprintf("🔹 **%s**\n   🔗 %s\n   📝 %s", title, link, snippet))
+			count++
+		}
+	})
+
+	if len(results) == 0 {
+		return "⚠️ Arama yapıldı ama anlamlı sonuç bulunamadı. Sorguyu değiştirmeyi dene.", nil
+	}
+
+	return fmt.Sprintf("🔍 '%s' için Arama Sonuçları:\n\n%s", query, strings.Join(results, "\n\n")), nil
+}
+
+// --- 2. DOWNLOAD FILE COMMAND ---
+
+type DownloadFileCommand struct {
+	BaseDir string
+}
+
+func (c *DownloadFileCommand) Name() string { return "download_file" }
+
+func (c *DownloadFileCommand) Description() string {
+	return "İnternetten dosya indirir."
+}
+
+func (c *DownloadFileCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"url": map[string]interface{}{
+				"type":        "string",
+				"description": "İndirilecek dosyanın bağlantısı (URL).",
+			},
+			"filename": map[string]interface{}{
+				"type":        "string",
+				"description": "Kaydedilecek dosya adı (Opsiyonel). Boş bırakılırsa URL'den tahmin edilir.",
+			},
+		},
+		"required": []string{"url"},
+	}
+}
+
+func (c *DownloadFileCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	fileURL, ok := args["url"].(string)
+	if !ok || fileURL == "" {
+		return "", fmt.Errorf("eksik parametre: 'url' zorunludur")
+	}
+
+	// Dosya adını belirle
+	fileName, okN := args["filename"].(string)
+	if !okN || fileName == "" {
+		// URL'den dosya adını çıkar (örn: .../installer.exe)
+		tokens := strings.Split(fileURL, "/")
+		if len(tokens) > 0 {
+			fileName = tokens[len(tokens)-1]
+		} else {
+			fileName = fmt.Sprintf("downloaded_%d.bin", time.Now().Unix())
+		}
+		// Temizle (Query parametrelerini at)
+		if idx := strings.Index(fileName, "?"); idx != -1 {
+			fileName = fileName[:idx]
+		}
+	}
+
+	fullPath := filepath.Join(c.BaseDir, fileName)
+
+	// İndirme İşlemi
+	client := &http.Client{Timeout: 600 * time.Second} // Büyük dosyalar için uzun timeout
+	resp, err := client.Get(fileURL)
+	if err != nil {
+		return "", fmt.Errorf("indirme başlatılamadı: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("indirme hatası (Status: %d)", resp.StatusCode)
+	}
+
+	// Dosyayı oluştur
+	out, err := os.Create(fullPath)
+	if err != nil {
+		return "", fmt.Errorf("dosya oluşturulamadı: %v", err)
+	}
+	defer out.Close()
+
+	// Veriyi yaz
+	n, err := io.Copy(out, resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("yazma hatası: %v", err)
+	}
+
+	return fmt.Sprintf("✅ İndirme Başarılı:\n📂 %s\n📦 Boyut: %.2f MB", fileName, float64(n)/1024/1024), nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\commands\word_ops.go
+==========================================
+package commands
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
+
+	"github.com/nguyenthenguyen/docx"
+)
+
+// --- 1. WORD READ ---
+type WordReadCommand struct{ BaseDir string }
+
+func (c *WordReadCommand) Name() string { return "word_read" }
+func (c *WordReadCommand) Description() string { return "Word (.docx) dosyasının metin içeriğini okur." }
+
+func (c *WordReadCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Okunacak Word dosyasının yolu.",
+			},
+		},
+		"required": []string{"path"},
+	}
+}
+
+func (c *WordReadCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	path, ok := args["path"].(string)
+	if !ok { return "", fmt.Errorf("eksik parametre: path") }
+	
+	fullPath := filepath.Join(c.BaseDir, path)
+	r, err := docx.ReadDocxFile(fullPath)
+	if err != nil { return "", fmt.Errorf("dosya açılamadı: %v", err) }
+	defer r.Close()
+
+	content := r.Editable().GetContent()
+	return fmt.Sprintf("📝 WORD İÇERİĞİ:\n%s", stripXML(content)), nil
+}
+
+// --- 2. WORD CREATE ---
+type WordCreateCommand struct{ BaseDir string }
+
+func (c *WordCreateCommand) Name() string { return "word_create" }
+func (c *WordCreateCommand) Description() string { return "Profesyonel bir Word dokümanı oluşturur." }
+
+func (c *WordCreateCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path":    map[string]interface{}{"type": "string", "description": "Kaydedilecek dosya yolu."},
+			"title":   map[string]interface{}{"type": "string", "description": "Doküman başlığı."},
+			"content": map[string]interface{}{
+				"type": "array", 
+				"items": map[string]interface{}{"type": "string"},
+				"description": "Paragraflardan oluşan liste.",
+			},
+		},
+		"required": []string{"path", "content"},
+	}
+}
+
+func (c *WordCreateCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	if err := ensurePythonLibs(ctx, "python-docx"); err != nil { return "", err }
+
+	path, _ := args["path"].(string)
+	title, _ := args["title"].(string)
+	contentRaw, _ := args["content"].([]interface{})
+
+	if path == "" { return "", fmt.Errorf("eksik parametre: path") }
+
+	var contentStr strings.Builder
+	contentStr.WriteString("[")
+	for _, item := range contentRaw {
+		contentStr.WriteString(fmt.Sprintf("r'''%v''', ", item))
+	}
+	contentStr.WriteString("]")
+
+	script := fmt.Sprintf(`
+from docx import Document
+import sys
+import io
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+try:
+    doc = Document()
+    if r'%s': doc.add_heading(r'%s', 0)
+    paragraphs = %s
+    for p in paragraphs:
+        doc.add_paragraph(p)
+    doc.save(r'%s')
+    print("✅ Word dosyası oluşturuldu.")
+except Exception as e:
+    print(f"HATA: {e}")
+`, title, title, contentStr.String(), filepath.Join(c.BaseDir, path))
+
+	return runEmbeddedPython(ctx, script, c.BaseDir)
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\internal\patcher\smart_patcher.go
+==========================================
+package patcher
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/aydndglr/rick-agent/pkg/logger"
+)
+
+// SmartPatcher: Dil bağımsız, metin tabanlı akıllı yama yöneticisi.
+type SmartPatcher struct {
+	BaseDir string
+}
+
+func NewSmartPatcher(baseDir string) *SmartPatcher {
+	return &SmartPatcher{BaseDir: baseDir}
+}
+
+// Apply: Dosya içinde 'searchBlock' kısmını bulur ve 'replaceBlock' ile değiştirir.
+func (p *SmartPatcher) Apply(filePath, searchBlock, replaceBlock string) error {
+	logger.Action("🧩 Patch işlemi başlatılıyor: %s", filePath)
+
+	contentBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("dosya okunamadı: %v", err)
+	}
+	content := string(contentBytes)
+
+	// Normalizasyon (CRLF -> LF)
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	searchBlock = strings.ReplaceAll(searchBlock, "\r\n", "\n")
+	replaceBlock = strings.ReplaceAll(replaceBlock, "\r\n", "\n")
+
+	searchBlock = strings.TrimSpace(searchBlock)
+	replaceBlock = strings.TrimSpace(replaceBlock)
+
+	// 1. Tam Eşleşme (Exact Match)
+	if strings.Contains(content, searchBlock) {
+		newContent := strings.Replace(content, searchBlock, replaceBlock, 1)
+		return p.saveFile(filePath, newContent)
+	}
+
+	// 2. Esnek Arama (Fuzzy Match)
+	logger.Warn("⚠️ Tam eşleşme bulunamadı, esnek arama deneniyor...")
+	newContent, err := p.fuzzyReplace(content, searchBlock, replaceBlock)
+	if err != nil {
+		return fmt.Errorf("patch uygulanamadı! Modelin verdiği 'SEARCH' bloğu dosyada bulunamıyor. Hata: %v", err)
+	}
+
+	return p.saveFile(filePath, newContent)
+}
+
+// fuzzyReplace: Boşluk duyarsız satır eşleştirme
+func (p *SmartPatcher) fuzzyReplace(content, search, replace string) (string, error) {
+	fileLines := strings.Split(content, "\n")
+	searchLines := strings.Split(search, "\n")
+
+	if len(searchLines) == 0 {
+		return "", fmt.Errorf("arama bloğu boş olamaz")
+	}
+
+	matchIndex := -1
+
+	// Dosyayı satır satır gez
+	for i := 0; i <= len(fileLines)-len(searchLines); i++ {
+		match := true
+		for j := 0; j < len(searchLines); j++ {
+			if strings.TrimSpace(fileLines[i+j]) != strings.TrimSpace(searchLines[j]) {
+				match = false
+				break
+			}
+		}
+
+		if match {
+			matchIndex = i
+			break
+		}
+	}
+
+	if matchIndex == -1 {
+		return "", fmt.Errorf("kod bloğu bulunamadı")
+	}
+
+	var result []string
+	result = append(result, fileLines[:matchIndex]...)
+	result = append(result, replace)
+	result = append(result, fileLines[matchIndex+len(searchLines):]...)
+
+	return strings.Join(result, "\n"), nil
+}
+
+func (p *SmartPatcher) saveFile(path, content string) error {
+	err := os.WriteFile(path, []byte(content), 0644)
+	if err != nil {
+		return err
+	}
+	logger.Success("✅ Dosya başarıyla güncellendi: %s", path)
+	return nil
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\pkg\logger\logger.go
+==========================================
+package logger
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"time"
+)
+
+// Renk Seviyeleri
+const (
+	ColorReset  = "\033[0m"
+	ColorRed    = "\033[31m"
+	ColorGreen  = "\033[32m"
+	ColorYellow = "\033[33m"
+	ColorBlue   = "\033[34m"
+	ColorCyan   = "\033[36m"
+	ColorPurple = "\033[35m"
+)
+
+var (
+	debugMode bool
+	logFile   *os.File
+)
+
+// Setup: Logger'ı yapılandırır. Debug kapalıysa dosyaya yönlendirir.
+func Setup(debug bool) {
+	debugMode = debug
+	log.SetFlags(0)
+
+	// Debug kapalıysa tüm logları (ve özellikle debug loglarını) dosyaya yazmak için dosya aç
+	if !debug {
+		f, err := os.OpenFile("rick_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			logFile = f
+			Info("📝 Debug modu kapalı. Ayrıntılı loglar 'rick_debug.log' dosyasına yazılıyor.")
+		} else {
+			fmt.Printf("⚠️ Log dosyası oluşturulamadı: %v\n", err)
+		}
+	}
+}
+
+// logMessage: Mesajın nereye gideceğine karar veren yardımcı fonksiyon
+func logToDest(color, level, msg string, forceTerminal bool) {
+	timestamp := time.Now().Format("15:04:05")
+	formattedTerminal := fmt.Sprintf("%s[%-7s]%s %s %s", color, level, ColorReset, timestamp, msg)
+	formattedFile := fmt.Sprintf("[%s] [%-7s] %s\n", time.Now().Format("2006-01-02 15:04:05"), level, msg)
+
+	// Dosyaya her zaman yaz (yedek olması iyidir)
+	if logFile != nil {
+		logFile.WriteString(formattedFile)
+	}
+
+	// Terminale ne zaman yazılacak?
+	// 1. debugMode true ise HER ŞEYİ yaz.
+	// 2. forceTerminal true ise (Info, Success, Error, Warn) HER ZAMAN yaz.
+	if debugMode || forceTerminal {
+		if level == "ERROR" {
+			fmt.Fprintln(os.Stderr, formattedTerminal)
+		} else {
+			fmt.Println(formattedTerminal)
+		}
+	}
+}
+
+func Info(formatStr string, v ...interface{})    { logToDest(ColorBlue, "INFO", fmt.Sprintf(formatStr, v...), true) }
+func Success(formatStr string, v ...interface{}) { logToDest(ColorGreen, "SUCCESS", fmt.Sprintf(formatStr, v...), true) }
+func Action(formatStr string, v ...interface{})  { logToDest(ColorPurple, "ACTION", fmt.Sprintf(formatStr, v...), true) }
+func Warn(formatStr string, v ...interface{})    { logToDest(ColorYellow, "WARN", fmt.Sprintf(formatStr, v...), true) }
+func Error(formatStr string, v ...interface{})   { logToDest(ColorRed, "ERROR", fmt.Sprintf(formatStr, v...), true) }
+
+// Debug: Debug kapalıyken terminale basmaz, sadece dosyaya yazar.
+func Debug(formatStr string, v ...interface{}) {
+	logToDest(ColorCyan, "DEBUG", fmt.Sprintf(formatStr, v...), false)
+}
+
+==========================================
+FILE: D:\vsCode\rick-agent\cmd\rick\main.go
+==========================================
+package main
+
+import (
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+	"fmt"
+
+	"github.com/aydndglr/rick-agent/internal/agent"
+	"github.com/aydndglr/rick-agent/internal/brain"
+	"github.com/aydndglr/rick-agent/internal/communication"
+	"github.com/aydndglr/rick-agent/internal/config"
+	"github.com/aydndglr/rick-agent/internal/memory"
+	"github.com/aydndglr/rick-agent/internal/tools"
+	"github.com/aydndglr/rick-agent/pkg/logger"
+	"github.com/aydndglr/rick-agent/internal/commands"
+)
+
+func main() {
+	// 1. CONFIG YÜKLE
+	cfg, err := config.LoadConfig("config/config.yaml")
+	if err != nil {
+		logger.Error("❌ Config yüklenemedi: %v", err)
+		os.Exit(1)
+	}
+
+	// 2. LOGGER SETUP (Debug modunu config'den alıyoruz ama gereksiz info'yu azalttık)
+	logger.Setup(cfg.App.Debug)
+	// Sadece hayatta olduğuna dair tek bir log yeterli
+	logger.Success("🚀 Rick Agent V3 - Online")
+
+	// 3. BRAIN PROVIDER SEÇİMİ
+	ollama := brain.NewOllamaProvider(cfg.Brain.Ollama.BaseURL, cfg.Brain.Ollama.ModelName)
+	if !ollama.HealthCheck() {
+		logger.Error("❌ LLM Provider Bağlantı Hatası!")
+		os.Exit(1)
+	}
+	var llm brain.LLMProvider = ollama
+
+
+	// 4. MEMORY LAYER
+	vectorDB := memory.NewLocalVectorDB("rick_memory.json")
+
+	// 5. TOOL REGISTRY
+	reg := tools.NewRegistry(cfg.App.WorkDir)
+
+	//6. Arka plan alarm servisini başlat
+    commands.StartScheduler()
+
+	// 7. AGENT OLUŞTURMA
+	rick := agent.NewAgent(cfg, llm, reg, vectorDB)
+
+	// 8. CONTEXT & SHUTDOWN HANDLER
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Graceful shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		<-sigChan
+		// Kapanırken tek bir temiz log
+		fmt.Println("\n⚠️  Kapatılıyor...") 
+		cancel()
+	}()
+
+	// 8. WHATSAPP LISTENER BAŞLAT
+	if cfg.Communication.Whatsapp.Enabled {
+		wa := communication.NewWhatsappListener(cfg.Communication.Whatsapp.AdminPhone, rick)
+		// Burayı da sadeleştirdik
+		logger.Success("👂 WhatsApp Dinleniyor...")
+		go wa.Start(ctx)
+	}
+
+	// 9. OTONOM TEST DÖNGÜSÜ İPTAL EDİLDİ ❌
+	// Artık Rick sadece emir bekler.
+
+	// Uygulamanın kapanmasını engelle
+	<-ctx.Done()
+}
+

@@ -38,6 +38,7 @@ func (sb *SafeBuffer) String() string {
 type Task struct {
 	ID         string
 	Command    string
+	PID        int    // YENİ: İşletim Sistemi Süreç Kimliği
 	Status     string // "running", "completed", "failed", "killed"
 	Output     *SafeBuffer
 	StartTime  time.Time
@@ -47,7 +48,7 @@ type Task struct {
 }
 
 type TaskManager struct {
-	Tasks map[string]*Task
+	Tasks map[string]*Task // TaskID -> Task
 	mu    sync.RWMutex
 }
 
@@ -60,6 +61,19 @@ func GetTaskManager() *TaskManager {
 	return tmInstance
 }
 
+// IsRickProcess: Verilen PID'nin Rick tarafından başlatılıp başlatılmadığını kontrol eder.
+func (tm *TaskManager) IsRickProcess(pid int) (bool, string) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	
+	for _, task := range tm.Tasks {
+		if task.Status == "running" && task.PID == pid {
+			return true, task.ID
+		}
+	}
+	return false, ""
+}
+
 // --- 1. START BACKGROUND TASK ---
 
 type StartBackgroundTaskCommand struct{}
@@ -67,7 +81,7 @@ type StartBackgroundTaskCommand struct{}
 func (c *StartBackgroundTaskCommand) Name() string { return "start_task" }
 
 func (c *StartBackgroundTaskCommand) Description() string {
-	return "Arka planda uzun süreli bir işlem başlatır. ID döner, Rick sonucu beklemez."
+	return "Arka planda uzun süreli bir işlem başlatır. PID takibi yapar."
 }
 
 func (c *StartBackgroundTaskCommand) Parameters() map[string]interface{} {
@@ -76,7 +90,7 @@ func (c *StartBackgroundTaskCommand) Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "Arka planda çalıştırılacak uzun soluklu komut (örn: 'ping google.com -t', 'ffmpeg -i...').",
+				"description": "Çalıştırılacak komut (örn: 'python server.py', 'ping google.com -t').",
 			},
 		},
 		"required": []string{"command"},
@@ -92,7 +106,6 @@ func (c *StartBackgroundTaskCommand) Execute(ctx context.Context, args map[strin
 	tm := GetTaskManager()
 	taskID := fmt.Sprintf("task_%d", time.Now().UnixNano())
 
-	// Context ile İptal Edilebilir Komut Oluşturma
 	cmdCtx, cancel := context.WithCancel(context.Background())
 
 	var cmd *exec.Cmd
@@ -102,42 +115,45 @@ func (c *StartBackgroundTaskCommand) Execute(ctx context.Context, args map[strin
 		cmd = exec.CommandContext(cmdCtx, "bash", "-c", cmdStr)
 	}
 
-	// Thread-safe buffer kullanıyoruz
 	outBuf := &SafeBuffer{}
 	cmd.Stdout = outBuf
 	cmd.Stderr = outBuf
 
+	// Komutu başlat ama bekleme
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return "", fmt.Errorf("görev başlatılamadı: %v", err)
+	}
+
+	// YENİ: PID Yakalama
+	pid := 0
+	if cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+
 	task := &Task{
 		ID:         taskID,
 		Command:    cmdStr,
+		PID:        pid, // PID Kaydedildi
 		Status:     "running",
 		StartTime:  time.Now(),
 		Output:     outBuf,
 		CancelFunc: cancel,
 	}
 
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return "", fmt.Errorf("görev başlatılamadı: %v", err)
-	}
-
-	// Görevi listeye ekle
 	tm.mu.Lock()
 	tm.Tasks[taskID] = task
 	tm.mu.Unlock()
 
-	// Arka Plan İzleyicisi (Goroutine)
 	go func() {
 		err := cmd.Wait()
-
 		tm.mu.Lock()
 		defer tm.mu.Unlock()
-
 		task.EndTime = time.Now()
 
 		if cmdCtx.Err() == context.Canceled {
 			task.Status = "killed"
-			task.Output.Write([]byte("\n[SİSTEM]: Görev kullanıcı tarafından iptal edildi."))
+			task.Output.Write([]byte("\n[SİSTEM]: Görev Rick tarafından durduruldu."))
 		} else if err != nil {
 			task.Status = "failed"
 			task.Error = err
@@ -147,7 +163,7 @@ func (c *StartBackgroundTaskCommand) Execute(ctx context.Context, args map[strin
 		}
 	}()
 
-	return fmt.Sprintf("🚀 Arka plan görevi başlatıldı! (Asenkron Mod)\n🆔 ID: %s\nKomut: %s\nBen diğer işlerine bakabilirim, durum için: check_task", taskID, cmdStr), nil
+	return fmt.Sprintf("🚀 Görev Başlatıldı!\n🆔 ID: %s\n🔢 PID: %d\nKomut: %s", taskID, pid, cmdStr), nil
 }
 
 // --- 2. CHECK TASK STATUS ---
@@ -155,28 +171,20 @@ func (c *StartBackgroundTaskCommand) Execute(ctx context.Context, args map[strin
 type CheckTaskCommand struct{}
 
 func (c *CheckTaskCommand) Name() string { return "check_task" }
-
-func (c *CheckTaskCommand) Description() string {
-	return "Arka plan görevini kontrol eder veya tüm görevleri listeler."
-}
-
+func (c *CheckTaskCommand) Description() string { return "Rick'in başlattığı görevlerin durumunu kontrol eder." }
 func (c *CheckTaskCommand) Parameters() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"task_id": map[string]interface{}{
-				"type":        "string",
-				"description": "Kontrol edilecek görevin ID'si. Boş bırakılırsa tüm görevleri listeler.",
-			},
+			"task_id": map[string]interface{}{"type": "string", "description": "ID boş bırakılırsa tüm görevler listelenir."},
 		},
-		// required alanı boş, çünkü task_id opsiyonel
 	}
 }
 
 func (c *CheckTaskCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	taskID, ok := args["task_id"].(string)
-	if !ok || taskID == "" {
-		return listAllTasks()
+	taskID, _ := args["task_id"].(string)
+	if taskID == "" {
+		return listAllRickTasks()
 	}
 
 	tm := GetTaskManager()
@@ -185,130 +193,165 @@ func (c *CheckTaskCommand) Execute(ctx context.Context, args map[string]interfac
 	tm.mu.RUnlock()
 
 	if !exists {
-		return "", fmt.Errorf("bu ID ile görev bulunamadı: %s", taskID)
+		return "", fmt.Errorf("görev bulunamadı: %s", taskID)
 	}
 
-	// Süre Hesapla
-	duration := time.Since(task.StartTime)
-	if task.Status != "running" {
-		duration = task.EndTime.Sub(task.StartTime)
-	}
-
-	// Çıktıyı Güvenli Al
 	output := task.Output.String()
-	
-	// Çok uzun çıktıları kırp
-	if len(output) > 1500 {
-		output = "...(önceki çıktılar)...\n" + output[len(output)-1500:]
-	}
-	if output == "" {
-		output = "(Henüz çıktı yok veya işlem sessiz çalışıyor)"
+	if len(output) > 1000 {
+		output = "...(önceki loglar)...\n" + output[len(output)-1000:]
 	}
 
 	statusIcon := "⏳"
-	if task.Status == "completed" {
-		statusIcon = "✅"
-	} else if task.Status == "failed" {
-		statusIcon = "❌"
-	} else if task.Status == "killed" {
-		statusIcon = "🛑"
-	}
+	if task.Status == "completed" { statusIcon = "✅" }
+	if task.Status == "failed" { statusIcon = "❌" }
+	if task.Status == "killed" { statusIcon = "🛑" }
 
-	return fmt.Sprintf(
-		"%s GÖREV RAPORU (%s)\n"+
-			"----------------------\n"+
-			"Komut: %s\n"+
-			"Durum: %s\n"+
-			"Süre: %s\n"+
-			"----------------------\n"+
-			"📝 CANLI ÇIKTI:\n%s",
-		statusIcon, task.ID, task.Command, strings.ToUpper(task.Status), duration.Round(time.Second), output,
-	), nil
+	return fmt.Sprintf("%s GÖREV DETAYI (%s)\nPID: %d\nDurum: %s\nLog:\n%s", statusIcon, task.ID, task.PID, strings.ToUpper(task.Status), output), nil
 }
 
-// --- 3. KILL TASK COMMAND ---
+// --- 3. KILL TASK (SMART) ---
 
 type KillTaskCommand struct{}
 
 func (c *KillTaskCommand) Name() string { return "kill_task" }
-
-func (c *KillTaskCommand) Description() string {
-	return "Arka plan görevini İPTAL EDER."
-}
-
+func (c *KillTaskCommand) Description() string { return "Rick'in başlattığı bir görevi ID ile durdurur." }
 func (c *KillTaskCommand) Parameters() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"task_id": map[string]interface{}{
-				"type":        "string",
-				"description": "Durdurulacak görevin ID'si.",
-			},
+			"task_id": map[string]interface{}{"type": "string", "description": "Durdurulacak Görev ID'si."},
 		},
 		"required": []string{"task_id"},
 	}
 }
 
 func (c *KillTaskCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	taskID, ok := args["task_id"].(string)
-	if !ok {
-		return "", fmt.Errorf("eksik parametre: task_id")
-	}
-
+	taskID, _ := args["task_id"].(string)
 	tm := GetTaskManager()
 	tm.mu.Lock()
 	task, exists := tm.Tasks[taskID]
-	
 	if !exists {
 		tm.mu.Unlock()
-		return "", fmt.Errorf("görev bulunamadı")
+		return "", fmt.Errorf("bu ID ile aktif bir görevim yok.")
 	}
-
-	if task.Status != "running" {
-		tm.mu.Unlock()
-		return fmt.Sprintf("⚠️ Bu görev zaten aktif değil: %s", task.Status), nil
-	}
-
-	// 1. Context Cancel Fonksiyonunu Çağır
-	if task.CancelFunc != nil {
-		task.CancelFunc()
-	}
-
-	// 2. Durumu güncelle
-	task.Status = "killed"
-	task.EndTime = time.Now()
 	
+	if task.Status == "running" && task.CancelFunc != nil {
+		task.CancelFunc() // Context Cancel -> Process Kill
+		task.Status = "killed"
+		task.EndTime = time.Now()
+		tm.mu.Unlock()
+		return fmt.Sprintf("🛑 Görev (PID: %d) başarıyla sonlandırıldı.", task.PID), nil
+	}
 	tm.mu.Unlock()
-
-	return fmt.Sprintf("🛑 Görev iptal sinyali gönderildi: %s\nRick: 'Emrin üzerine işlemi durdurdum patron.'", taskID), nil
+	return fmt.Sprintf("⚠️ Görev zaten aktif değil: %s", task.Status), nil
 }
 
-// Helper: List All Tasks
-func listAllTasks() (string, error) {
+// --- 4. YENİ: LIST SYSTEM PROCESSES (GÖZLEM YETENEĞİ) ---
+
+type ListSystemProcessesCommand struct{}
+
+func (c *ListSystemProcessesCommand) Name() string { return "list_processes" }
+
+func (c *ListSystemProcessesCommand) Description() string {
+	return "Sistemde çalışan programları listeler. Hangi programın Rick'e, hangisinin sisteme/kullanıcıya ait olduğunu gösterir."
+}
+
+func (c *ListSystemProcessesCommand) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"filter": map[string]interface{}{
+				"type": "string", 
+				"description": "Program adı filtresi (örn: 'chrome', 'python'). Boş bırakılırsa hepsini (ilk 50) getirir.",
+			},
+		},
+	}
+}
+
+func (c *ListSystemProcessesCommand) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	filter, _ := args["filter"].(string)
+	filter = strings.ToLower(filter)
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// CSV formatında al: "Image Name","PID","Session Name","Session#","Mem Usage"
+		cmd = exec.Command("tasklist", "/FO", "CSV", "/NH")
+	} else {
+		// Linux/Mac: pid, command
+		cmd = exec.Command("ps", "-e", "-o", "pid,comm")
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("süreç listesi alınamadı: %v", err)
+	}
+
+	lines := strings.Split(string(output), "\n")
+	var sb strings.Builder
+	tm := GetTaskManager()
+
+	sb.WriteString(fmt.Sprintf("🖥️ SİSTEM SÜREÇLERİ (Filtre: '%s')\n", filter))
+	sb.WriteString("PID    | SAHİBİ        | PROGRAM\n")
+	sb.WriteString("-------|---------------|------------------\n")
+
+	count := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" { continue }
+
+		var pid int
+		var name string
+
+		// Basit parsing (Windows/Linux ayrımı)
+		if runtime.GOOS == "windows" {
+			parts := strings.Split(line, "\",\"")
+			if len(parts) >= 2 {
+				name = strings.Trim(parts[0], "\"")
+				fmt.Sscanf(strings.Trim(parts[1], "\""), "%d", &pid)
+			}
+		} else {
+			fmt.Sscanf(strings.TrimSpace(line), "%d %s", &pid, &name)
+		}
+
+		// Filtreleme
+		if filter != "" && !strings.Contains(strings.ToLower(name), filter) {
+			continue
+		}
+
+		// SAHİPLİK KONTROLÜ
+		owner := "SİSTEM/KULLANICI"
+		isMine, taskID := tm.IsRickProcess(pid)
+		if isMine {
+			owner = fmt.Sprintf("RICK (%s)", taskID)
+		}
+
+		// Sadece ilk 30 sonucu veya filtrelenenleri göster
+		if count < 30 || filter != "" {
+			sb.WriteString(fmt.Sprintf("%-6d | %-13s | %s\n", pid, owner, name))
+		}
+		count++
+	}
+
+	if count > 30 && filter == "" {
+		sb.WriteString("... (ve daha fazlası. Tam liste için filtre kullanın)\n")
+	}
+
+	return sb.String(), nil
+}
+
+// Helper
+func listAllRickTasks() (string, error) {
 	tm := GetTaskManager()
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 
 	if len(tm.Tasks) == 0 {
-		return "📭 Şu an arka planda çalışan veya bitmiş görev yok.", nil
+		return "📭 Rick'e ait aktif görev yok.", nil
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📋 GÖREV YÖNETİCİSİ:\n")
+	sb.WriteString("🤖 RICK'İN GÖREVLERİ:\n")
 	for id, task := range tm.Tasks {
-		icon := "⏳"
-		if task.Status == "completed" {
-			icon = "✅"
-		} else if task.Status == "failed" {
-			icon = "❌"
-		} else if task.Status == "killed" {
-			icon = "🛑"
-		}
-		
-		shortID := id
-		if len(id) > 15 { shortID = "..." + id[len(id)-10:] }
-
-		sb.WriteString(fmt.Sprintf("- %s %s | %s\n", icon, shortID, task.Status))
+		sb.WriteString(fmt.Sprintf("🆔 %s | PID: %d | Durum: %s | Komut: %s\n", id, task.PID, task.Status, task.Command))
 	}
 	return sb.String(), nil
 }

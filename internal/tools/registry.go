@@ -22,6 +22,7 @@ type DynamicTool struct {
 	DescStr    string
 	ScriptPath string
 	BaseDir    string
+	Python     *PythonManager // YENİ: Sanal ortam yöneticisi
 }
 
 func (d *DynamicTool) Name() string        { return d.NameStr }
@@ -38,8 +39,18 @@ func (d *DynamicTool) Parameters() map[string]interface{} {
 
 func (d *DynamicTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	argsJSON, _ := json.Marshal(args)
-	cmd := exec.CommandContext(ctx, "python", d.ScriptPath, string(argsJSON))
+
+	// GÜNCELLEME: Global "python" yerine Sanal Ortamın (venv) yolunu kullanıyoruz.
+	interpreter := "python"
+	if d.Python != nil {
+		interpreter = d.Python.GetInterpreterPath()
+	}
+
+	cmd := exec.CommandContext(ctx, interpreter, d.ScriptPath, string(argsJSON))
 	cmd.Dir = d.BaseDir
+
+	// Ortam değişkenlerini de aktaralım (Gerekirse)
+	cmd.Env = os.Environ()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -54,9 +65,19 @@ type Registry struct {
 	mu       sync.RWMutex
 	BaseDir  string
 	ToolsDir string // user_tools klasörü
+	Python   *PythonManager // YENİ: Merkezi Python Yönetimi
 }
 
 func NewRegistry(baseDir string) *Registry {
+	// 1. Python Ortamını Hazırla (Venv Kontrolü)
+	pm, err := NewPythonManager(baseDir)
+	if err != nil {
+		logger.Error("Kritik Hata: Python ortamı oluşturulamadı! %v", err)
+		// Python olmadan Rick'in araçlarının çoğu çalışmaz, bu yüzden çıkış yapabiliriz
+		// veya sadece loglayıp devam edebiliriz (Tercihen çıkış).
+		os.Exit(1)
+	}
+
 	toolsDir := filepath.Join(baseDir, "user_tools")
 	_ = os.MkdirAll(toolsDir, 0755)
 
@@ -64,6 +85,7 @@ func NewRegistry(baseDir string) *Registry {
 		commands: make(map[string]commands.Command),
 		BaseDir:  baseDir,
 		ToolsDir: toolsDir,
+		Python:   pm, // Manager'ı kaydet
 	}
 
 	r.registerAll()
@@ -104,7 +126,8 @@ func (r *Registry) registerAll() {
 	r.Register(&commands.BrowserReadCommand{})
 	r.Register(&commands.BrowserInteractCommand{})
 
-	// 7. Ofis ve Verimlilik (Office Ops - PARÇALANMIŞ YENİ YAPI)
+	// 7. Ofis ve Verimlilik (Office Ops)
+	// Not: Bu komutların da ileride PyMgr desteği alacak şekilde güncellenmesi gerekecek.
 	r.Register(&commands.OutlookReadCommand{BaseDir: r.BaseDir})
 	r.Register(&commands.OutlookSendCommand{BaseDir: r.BaseDir})
 	r.Register(&commands.OutlookOrganizeCommand{BaseDir: r.BaseDir})
@@ -152,6 +175,7 @@ func (r *Registry) LoadDynamicTools() {
 			DescStr:    meta["description"],
 			ScriptPath: filepath.Join(r.ToolsDir, meta["script"]),
 			BaseDir:    r.BaseDir,
+			Python:     r.Python, // YENİ: Python Manager enjekte edildi
 		})
 	}
 }
@@ -162,6 +186,7 @@ func (r *Registry) RegisterDynamicTool(name, desc, scriptName string) {
 		DescStr:    desc,
 		ScriptPath: filepath.Join(r.ToolsDir, scriptName),
 		BaseDir:    r.BaseDir,
+		Python:     r.Python, // YENİ: Python Manager enjekte edildi
 	})
 	r.saveToRegistryJSON(name, desc, scriptName)
 }
