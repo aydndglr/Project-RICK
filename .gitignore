@@ -5,6 +5,7 @@
 *.dylib
 /bin/
 /obj/
+/rick_venv/
 
 # --- Loglar ve Geçici Dosyalar ---
 *.log
