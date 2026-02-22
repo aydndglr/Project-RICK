@@ -2,7 +2,7 @@
 
 > *"Wubba Lubba Dub Dub!"* 
 
-**Project RICK**, Go (Golang) tabanlı, yerel LLM modelleri (Ollama) ile çalışan, kendi kendine karar verebilen, kod yazabilen ve sistem yönetimi yapabilen otonom bir yapay zeka ajanıdır. 
+**Project RICK** ( Robust Intelligent Cognitive Kernel ) , Go (Golang) tabanlı, yerel LLM modelleri (Ollama) ile çalışan, kendi kendine karar verebilen, kod yazabilen ve sistem yönetimi yapabilen otonom bir yapay zeka ajanıdır. 
 
 Sıradan chatbotların aksine Rick; işletim sistemi üzerinde tam yetkiye sahiptir, araç (tool) kullanabilir ve WhatsApp üzerinden gerçek zamanlı iletişim kurabilir.
 
