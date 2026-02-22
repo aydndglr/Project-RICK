@@ -1,0 +1,54 @@
+app:
+  name: "Rick Agent V3 (RickOS)"
+  active_prompt: "prompts/RickOS_3.txt"
+  version: "4.0.0"
+  timeout_minutes: 500
+  debug: true
+  work_dir: "."
+
+# Güvenlik Seviyeleri:
+# 1. "god_mode": Tam yetki. Dosya siler, format atar, kod yazar, kendini günceller.
+# 2. "standard": Araç kullanır ama kritik sistem dosyalarına dokunamaz. Yeni araç yazarken onay ister.
+# 3. "restricted": Sadece okuma yapar (Read-Only). Kod yazamaz, dosya silemez.
+security:
+  level: "god_mode" # god_mode | standard | restricted
+  auto_patching: true # Kendi kod hatalarını düzeltme izni
+
+brain:
+  # Ana Beyin (Genelde Local Ollama)
+  primary:
+    provider: "ollama"
+    base_url:   "http://localhoat:11434"
+    model_name: "qwen3:8b" # "gemini-2.0-flash" # "qwen3:8b" #"qwen2.5-coder:latest" # "qwen3:8b"
+    temperature: 0.9
+    num_ctx: 8192
+
+  # Yedek/İkinci Beyin (Uzak Sunucu veya Farklı Model)
+  secondary:
+    enabled: true
+    provider: "ollama_remote" # veya "openai", "gemini"
+    base_url: "http://REMOTE_IP:11434" # Örnek uzak IP
+    model_name: "llama3:latest"
+  
+  # API Anahtarları (Bulut desteği gerekirse)
+  api_keys:
+    openai: "sk-..."
+    gemini: "AIza"
+    anthropic: "sk-ant..."
+
+communication:
+  whatsapp:
+    enabled: true
+    admin_phone: "83838298517582" # Sadece bu numaradan gelen emirlere bakar
+    database_path: "rick_whatsapp.db"
+
+system_tools:
+  - "browser"
+  - "sys_exec"
+  - "fs_read"
+  - "fs_list"
+  - "fs_write"
+  - "fs_delete"
+  - "dev_studio"
+  - "edit_python_tool"
+  - "delete_python_tool"
